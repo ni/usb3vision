@@ -27,7 +27,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor,
+ * Boston, MA  02110-1301, USA.
  */
 
 #ifndef _U3V_H_
@@ -125,4 +126,26 @@ struct u3v_device_info {
 
 /* Helper functions for interfaces */
 int reset_pipe(struct u3v_device *u3v, struct u3v_interface_info *iface_info);
+
+static inline void u3v_reinit_completion(struct completion *x)
+{
+#ifdef INIT_COMPLETION
+	INIT_COMPLETION(*x);
+#else
+	reinit_completion(x);
+#endif
+}
+
+/* Helper function for sysfs attributes */
+static inline struct u3v_device *u3v_get_driver_data(struct device *dev)
+{
+	struct usb_interface *intf;
+
+	if (dev == NULL)
+		return NULL;
+
+	intf = to_usb_interface(dev);
+	return (intf ? usb_get_intfdata(intf) : NULL);
+}
+
 #endif /*  _U3V_H_ */

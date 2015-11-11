@@ -27,7 +27,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor,
+ * Boston, MA  02110-1301, USA.
  */
 
 #include "u3v.h"
@@ -40,6 +41,7 @@
 #include <linux/kernel.h>
 #include <linux/lcm.h>
 #include <linux/module.h>
+#include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <linux/sysfs.h>
 #include <linux/types.h>
@@ -97,7 +99,7 @@ do {								\
 	mutex_lock(&interface_info.ioctl_count_lock);		\
 	ptr = (ptr_type)(interface_info.interface_ptr);		\
 	if (interface_info.ioctl_count++ == 0)			\
-		INIT_COMPLETION(interface_info.ioctl_complete);	\
+		u3v_reinit_completion(&interface_info.ioctl_complete);	\
 	mutex_unlock(&interface_info.ioctl_count_lock);		\
 	mutex_unlock(&interface_info.interface_lock);		\
 } while (0)
@@ -116,11 +118,10 @@ do {								\
 static ssize_t name##_show(struct device *dev,				\
 	struct device_attribute *attr, char *buf)			\
 {									\
-	struct usb_interface *intf = to_usb_interface(dev);		\
-	struct u3v_device *u3v = usb_get_intfdata(intf);		\
+	struct u3v_device *u3v = u3v_get_driver_data(dev);		\
 									\
 	if (u3v == NULL || u3v->u3v_info == NULL)			\
-		return 0;						\
+		return -ENODEV;						\
 									\
 	return scnprintf(buf, PAGE_SIZE, "%u\n", u3v->u3v_info->name);	\
 }									\
@@ -130,11 +131,10 @@ static DEVICE_ATTR(name, S_IRUGO, name##_show, NULL);
 static ssize_t name##_show(struct device *dev,				\
 	struct device_attribute *attr, char *buf)			\
 {									\
-	struct usb_interface *intf = to_usb_interface(dev);		\
-	struct u3v_device *u3v = usb_get_intfdata(intf);		\
+	struct u3v_device *u3v = u3v_get_driver_data(dev);		\
 									\
 	if (u3v == NULL || u3v->u3v_info == NULL)			\
-		return 0;						\
+		return -ENODEV;						\
 									\
 	return scnprintf(buf, PAGE_SIZE, "%s\n", u3v->u3v_info->name);	\
 }									\
@@ -144,14 +144,12 @@ static DEVICE_ATTR(name, S_IRUGO, name##_show, NULL);
 static ssize_t name##_show(struct device *dev,				\
 	struct device_attribute *attr, char *buf)			\
 {									\
-	struct usb_interface *intf = to_usb_interface(dev);		\
-	struct u3v_device *u3v = usb_get_intfdata(intf);		\
-	struct usb_device *udev = u3v->udev;				\
+	struct u3v_device *u3v = u3v_get_driver_data(dev);		\
 									\
-	if (udev == NULL)						\
-		return 0;						\
+	if (u3v == NULL || u3v->udev == NULL)				\
+		return -ENODEV;						\
 									\
-	return scnprintf(buf, PAGE_SIZE, "%s\n", udev->name);		\
+	return scnprintf(buf, PAGE_SIZE, "%s\n", u3v->udev->name);	\
 }									\
 static DEVICE_ATTR(name, S_IRUGO, name##_show, NULL);
 
@@ -159,15 +157,13 @@ static DEVICE_ATTR(name, S_IRUGO, name##_show, NULL);
 static ssize_t name##_show(struct device *dev,				\
 	struct device_attribute *attr, char *buf)			\
 {									\
-	struct usb_interface *intf = to_usb_interface(dev);		\
-	struct u3v_device *u3v = usb_get_intfdata(intf);		\
-	struct usb_device *udev = u3v->udev;				\
+	struct u3v_device *u3v = u3v_get_driver_data(dev);		\
 									\
-	if (udev == NULL)						\
-		return 0;						\
+	if (u3v == NULL || u3v->udev == NULL)				\
+		return -ENODEV;						\
 									\
 	return scnprintf(buf, PAGE_SIZE, "%u\n",			\
-		le16_to_cpup(&udev->descriptor.name));			\
+		le16_to_cpup(&u3v->udev->descriptor.name));		\
 }									\
 static DEVICE_ATTR(name, S_IRUGO, name##_show, NULL);
 
@@ -243,7 +239,7 @@ static struct usb_class_driver u3v_class = {
 	* in /proc/config.gz), then you can dynamically allocate the minor
 	* number out of the list of available ones. Ideally this would be
 	* set so that we could have more than 16 of a single type of
-	* device. However, it is not currently set, so we use this minor
+	* device. However, if it is not set, we use this minor
 	* base to provide this minor number and the 15 subsequent numbers
 	* to be allocated.
 	*/
@@ -961,22 +957,36 @@ error:
 int u3v_control_msg(struct usb_device *udev, __u8 request, __u8 requesttype,
 	__u16 value, __u16 index, void *data, __u16 size)
 {
-	int ret;
-	void *kdata = kzalloc(size, GFP_KERNEL);
-	if (!kdata)
+	int ret = U3V_ERR_NO_ERROR;
+	int bytes_transferred = 0;
+	void *kdata = NULL;
+
+	if (data == NULL)
+		return -EINVAL;
+
+	kdata = kzalloc(size, GFP_KERNEL);
+	if (kdata == NULL)
 		return -ENOMEM;
 
 	/*
 	 * usb_control_msg returns number of bytes transferred if successful,
 	 * or a negative error code upon failure
 	 */
-	ret = usb_control_msg(udev, usb_rcvctrlpipe(udev, U3V_CTRL_ENDPOINT),
-		request, requesttype, value, index, kdata, size, U3V_TIMEOUT);
+	bytes_transferred = usb_control_msg(udev,
+		usb_rcvctrlpipe(udev, U3V_CTRL_ENDPOINT), request, requesttype,
+		value, index, kdata, size, U3V_TIMEOUT);
 
-	if (ret != size)
-		return ret;
-	copy_to_user(data, kdata, size);
-	return 0;
+	if (bytes_transferred != size) {
+		ret = bytes_transferred;
+		goto exit;
+	}
+
+	if (copy_to_user(data, kdata, size) != 0)
+		ret = U3V_ERR_INTERNAL;
+
+exit:
+	kfree(kdata);
+	return ret;
 }
 
 
@@ -1015,8 +1025,6 @@ static void u3v_delete(struct kref *kref)
 	if (u3v == NULL)
 		return;
 
-	kfree(u3v->u3v_info);
-
 	mutex_lock(&u3v->control_info.interface_lock);
 	u3v_destroy_control(u3v);
 	mutex_unlock(&u3v->control_info.interface_lock);
@@ -1030,6 +1038,8 @@ static void u3v_delete(struct kref *kref)
 	mutex_unlock(&u3v->event_info.interface_lock);
 
 	usb_put_dev(u3v->udev);
+	kfree(u3v->u3v_info);
+	kfree(u3v);
 }
 
 
@@ -1212,18 +1222,31 @@ static int populate_u3v_properties(struct u3v_device *u3v)
 
 	u3v_info->previously_initialized = 0;
 	/*
-	 * This is a workaround for issues we are seeing with ehci
-	 * on ARM targets with the 3.2 kernel. Setting the byte alignment
+	 * This is a workaround for issues we are seeing with EHCI
+	 * on Zynq targets with the 3.2 kernel. Setting the byte alignment
 	 * to a page enables us to use bounce buffering instead of DMA
 	 * for transfers less than a page in size
 	 */
-#ifdef __arm__
+#ifdef ZYNQ_3_2_EHCI_QUIRK
 	u3v_info->host_byte_alignment = 4096;
 #else
 	u3v_info->host_byte_alignment = 1;
 #endif
-	/* There is no maximum transfer size on Linux */
+
+#ifndef ARCH_HAS_SG_CHAIN
+	/*
+	 * If chaining is not enabled for scatter-gather lists,
+	 * we are limited to what would fit in a single page.
+	 * The number of sg entries for a single page is
+	 * SG_MAX_SINGLE_ALLOC, so with worst case fragmentation
+	 * (no adjacent pages to coalesce), the maximum transfer
+	 * would be the number of sg entries in a page *
+	 * the page size.
+	 */
+	u3v_info->os_max_transfer_size = SG_MAX_SINGLE_ALLOC * PAGE_SIZE;
+#else
 	u3v_info->os_max_transfer_size = UINT_MAX;
+#endif
 
 	/*
 	 * sirm_addr and transfer_alignment cannot be properly initialized
@@ -1350,7 +1373,7 @@ static int u3v_probe(struct usb_interface *interface,
 		return -ENOMEM;
 
 	/* Allocate memory for the U3V device info. */
-	u3v_info = kmalloc(sizeof(*u3v_info), GFP_KERNEL);
+	u3v_info = kzalloc(sizeof(*u3v_info), GFP_KERNEL);
 	if (u3v_info == NULL) {
 		kfree(u3v);
 		return -ENOMEM;
@@ -1412,7 +1435,6 @@ static int u3v_probe(struct usb_interface *interface,
 error:
 	sysfs_remove_group(&interface->dev.kobj, &u3v_attr_grp);
 	kref_put(&u3v->kref, u3v_delete);
-	kfree(u3v_info);
 	return ret;
 }
 
@@ -1498,15 +1520,25 @@ static int reset_endpoint(struct u3v_device *u3v,
  */
 static void u3v_disconnect(struct usb_interface *interface)
 {
-	struct u3v_device *u3v;
-
-	u3v = usb_get_intfdata(interface);
-	if (interface->cur_altsetting->desc.bInterfaceNumber == 0)
+	struct u3v_device *u3v = usb_get_intfdata(interface);
+	/*
+	 * Since we bind to each interface, we receive separate
+	 * disconnect callbacks for each one. We are guaranteed to
+	 * have at least one interface, so there should always be a
+	 * valid interface 0. We only want to take these actions
+	 * one time per device, so we only do so in the case
+	 * that we have interface 0.
+	 */
+	if (interface->cur_altsetting->desc.bInterfaceNumber == 0) {
 		dev_info(u3v->device,
 		"%s: U3V device removed\n", __func__);
-	usb_deregister_dev(interface, &u3v_class);
-	sysfs_remove_group(&interface->dev.kobj, &u3v_attr_grp);
-	u3v->device_connected = false;
+
+		usb_deregister_dev(interface, &u3v_class);
+		sysfs_remove_group(&interface->dev.kobj, &u3v_attr_grp);
+		u3v->device_connected = false;
+
+		kref_put(&u3v->kref, u3v_delete);
+	}
 }
 
 
