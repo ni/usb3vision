@@ -27,7 +27,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor,
+ * Boston, MA  02110-1301, USA.
  */
 
 #include "u3v.h"
@@ -69,7 +70,7 @@ struct urb_info {
 	struct pg_list *pglist;
 	u8 *buffer;
 	size_t buffer_size;
-	size_t min_expected_size;
+	size_t expected_size;
 };
 
 enum buffer_state {
@@ -125,11 +126,11 @@ static int create_buffer_entry(struct u3v_stream *stream,
 	__u64 *buffer_id);
 static int allocate_urb_buffer(struct u3v_stream *stream,
 	struct urb_info *urb_info, size_t size,
-	size_t min_expected_size);
+	size_t expected_size);
 static int map_urb_buffer(struct u3v_stream *stream,
 	struct urb_info *urb_info, void *user_buffer,
 	size_t buffer_size, size_t offset,
-	size_t urb_buffer_size, size_t min_expected_size);
+	size_t urb_buffer_size, size_t expected_size);
 static int destroy_buffer(struct u3v_stream *stream, __u64 buffer_id);
 static void destroy_urb(struct urb_info *urb_info);
 static struct pg_list *create_pg_list(struct u3v_stream *stream,
@@ -584,6 +585,11 @@ static int create_buffer_entry(struct u3v_stream *stream,
 				create_pg_list(stream,
 				user_transfer2_addr,
 				stream->config.transfer2_size);
+			if (entry->urb_info_array[i - 1].pglist == NULL) {
+				ret = U3V_ERR_INTERNAL;
+				goto error;
+			}
+
 			entry->transfer2_addr = user_transfer2_addr;
 		} else {
 			if (image_offset < stream->config.image_buffer_size) {
@@ -649,7 +655,7 @@ static int create_buffer_entry(struct u3v_stream *stream,
 
 error:
 	for (i = 0; i < entry->urb_info_count; i++)
-		usb_free_urb(entry->urb_info_array[i].purb);
+		destroy_urb(&entry->urb_info_array[i]);
 	kfree(entry->urb_info_array);
 	kfree(entry);
 	return ret;
@@ -664,11 +670,11 @@ error:
  * @stream: pointer to the stream interface struct
  * @urb_info: on return this struct will be initialized
  * @size: size of the buffer to allocate
- * @min_expected_size: minimum amount of data we expect to receive
+ * @expected_size: amount of data we expect to receive
  */
 static int allocate_urb_buffer(struct u3v_stream *stream,
 			       struct urb_info *urb_info, size_t size,
-			       size_t min_expected_size)
+			       size_t expected_size)
 {
 	if (urb_info == NULL)
 		return -EINVAL;
@@ -679,7 +685,7 @@ static int allocate_urb_buffer(struct u3v_stream *stream,
 	urb_info->kernel_allocated = true;
 	urb_info->pglist = NULL;
 	urb_info->buffer_size = size;
-	urb_info->min_expected_size = min_expected_size;
+	urb_info->expected_size = expected_size;
 	return 0;
 }
 
@@ -696,23 +702,24 @@ static int allocate_urb_buffer(struct u3v_stream *stream,
  * @buffer_size: size of the user buffer
  * @offset: offset into the user buffer
  * @urb_buffer_size: size of the URB buffer
- * @min_expected_size: minimum size for valid data
+ * @expected_size: amount of data we expect to receive
  */
 static int map_urb_buffer(struct u3v_stream *stream,
 	struct urb_info *urb_info, void *user_buffer, size_t buffer_size,
-	size_t offset, size_t urb_buffer_size, size_t min_expected_size)
+	size_t offset, size_t urb_buffer_size, size_t expected_size)
 {
-	if (urb_info == NULL || user_buffer == NULL || buffer_size == 0)
+	if (urb_info == NULL || user_buffer == NULL || buffer_size == 0 ||
+		(offset + expected_size > buffer_size))
 		return -EINVAL;
 
 	urb_info->kernel_allocated = false;
-	urb_info->pglist = create_pg_list(stream, user_buffer,
-		buffer_size);
+	urb_info->pglist = create_pg_list(stream, user_buffer + offset,
+		expected_size);
 	if (urb_info->pglist == NULL)
 		return -ENOMEM;
 	urb_info->buffer = NULL;
 	urb_info->buffer_size = urb_buffer_size;
-	urb_info->min_expected_size = min_expected_size;
+	urb_info->expected_size = expected_size;
 	return 0;
 }
 
@@ -796,7 +803,7 @@ static void destroy_urb(struct urb_info *urb_info)
 	if (urb_info == NULL)
 		return;
 
-	kfree(urb_info->purb);
+	usb_free_urb(urb_info->purb);
 
 	if (urb_info->kernel_allocated)
 		kfree(urb_info->buffer);
@@ -842,7 +849,7 @@ int u3v_queue_buffer(struct u3v_stream *stream, __u64 buffer_id)
 
 	reset_counters(entry);
 	entry->state = u3v_queued;
-	INIT_COMPLETION(entry->buffer_complete);
+	u3v_reinit_completion(&entry->buffer_complete);
 
 	for (i = 0; i < entry->urb_info_count; i++) {
 		ret = submit_stream_urb(stream, &entry->urb_info_array[i]);
@@ -999,11 +1006,11 @@ static void stream_urb_completion(struct urb *purb)
 
 	dev_vdbg(dev, "%s: urb %d: length = %zu, expected >=%zu\n",
 		__func__, urb_info->urb_index, len,
-		urb_info->min_expected_size);
+		urb_info->expected_size);
 
 	WARN_ON(entry->state != u3v_queued);
 
-	if (len < urb_info->min_expected_size)
+	if (len < urb_info->expected_size)
 		entry->incomplete_callbacks_received++;
 
 	/* Handle the callback based on the urb index */
@@ -1165,7 +1172,7 @@ int u3v_wait_for_buffer(struct u3v_stream *stream, __u64 buffer_id,
 				entry->urb_info_array[transfer2_index].buffer,
 				min((size_t)(entry->transfer2_received_size),
 				entry->urb_info_array[transfer2_index].
-				min_expected_size));
+				expected_size));
 		if (ret != 0) {
 			dev_err(dev,  "%s: Error copying transfer2 buffer\n",
 				__func__);
@@ -1269,7 +1276,7 @@ static struct pg_list *create_pg_list(struct u3v_stream *stream,
 	}
 
 	create_sg_list(stream, pglist);
-	if (pglist->sgt->sgl == NULL)
+	if (pglist->sgt == NULL)
 		goto error;
 
 	return pglist;
@@ -1321,8 +1328,11 @@ static void create_sg_list(struct u3v_stream *stream, struct pg_list *pglist)
 		kzalloc(pglist->num_pages * sizeof(struct scatterlist),
 		GFP_KERNEL);
 
-	if (!pglist->sgt->sgl)
+	if (!pglist->sgt->sgl) {
+		kfree(pglist->sgt);
+		pglist->sgt = NULL;
 		return;
+	}
 
 	sg_init_table(pglist->sgt->sgl, pglist->num_pages);
 	pglist->sgt->nents = pglist->num_pages;
@@ -1361,6 +1371,7 @@ static void create_sg_list(struct u3v_stream *stream, struct pg_list *pglist)
 		dev_err(dev, "%s: failed to allocate sgtable with error %d\n",
 			__func__, ret);
 		kfree(pglist->sgt);
+		pglist->sgt = NULL;
 		return;
 	}
 #endif
@@ -1378,10 +1389,11 @@ static void destroy_sg_list(struct pg_list *pglist)
 		return;
 #if LINUX_VERSION_CODE <= KERNEL_VERSION(3, 6, 0)
 	kfree(pglist->sgt->sgl);
-	kfree(pglist->sgt);
 #else
 	sg_free_table(pglist->sgt);
 #endif
+	kfree(pglist->sgt);
+	pglist->sgt = NULL;
 }
 
 
@@ -1571,13 +1583,12 @@ static struct buffer_entry *search_buffer_entries(struct u3v_stream *stream,
 	while (node) {
 		struct buffer_entry *entry =
 			rb_entry(node, struct buffer_entry, node);
-		if (entry->buffer_id > value) {
+		if (entry->buffer_id > value)
 			node = node->rb_left;
-		} else if (entry->buffer_id < value) {
+		else if (entry->buffer_id < value)
 			node = node->rb_right;
-		} else {
+		else
 			return entry;
-		}
 	}
 	return NULL;
 }

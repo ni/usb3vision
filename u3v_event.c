@@ -27,7 +27,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor,
+ * Boston, MA  02110-1301, USA.
  */
 
 #include "u3v.h"
@@ -179,7 +180,13 @@ static int configure_events(struct u3v_event *event, __u32 event_max_transfer,
 		list_add_tail(&entry->list_elem, &event->event_queue);
 	}
 	return 0;
+
 error:
+	if (entry) {
+		usb_free_urb(entry->purb);
+		free_pages((unsigned long)(entry->buffer), event->order);
+		kfree(entry);
+	}
 	unconfigure_events(event);
 	dev_err(event->u3v_dev->device,
 		"%s: Error allocating memory for event queue\n", __func__);
@@ -366,7 +373,7 @@ static int queue_next_event(struct u3v_event *event)
 	/* Advance the queue */
 	list_rotate_left(&event->event_queue);
 	entry->state = event_queued;
-	INIT_COMPLETION(event->event_complete);
+	u3v_reinit_completion(&event->event_complete);
 
 	ret = submit_event_urb(event, entry);
 	if (ret != 0) {
@@ -422,7 +429,7 @@ static int submit_event_urb(struct u3v_event *event, struct event_entry *entry)
 		usb_unanchor_urb(entry->purb);
 		dev_err(dev, "%s: Error %d submitting urb\n", __func__, ret);
 	}
-	
+
 	return ret;
 }
 
@@ -588,7 +595,7 @@ exit:
 /*
  * transfer_event_data - copies the payload into the provided buffer
  * precondition: caller holds event_lock, and user_buffer and buffer_size are
- * 	not NULL
+ *	not NULL
  *
  * @event: pointer to event interface struct
  * @user_buffer: the event payload will be copied into this buffer

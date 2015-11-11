@@ -27,7 +27,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor,
+ * Boston, MA  02110-1301, USA.
  */
 
 #include "u3v.h"
@@ -218,20 +219,19 @@ int u3v_read_memory(struct u3v_control *ctrl, __u32 transfer_size,
 	__u32 *bytes_read, __u64 address, void *kernel_buffer,
 	void *user_buffer)
 {
-	const int max_bytes_per_read = ctrl->max_ack_transfer_size -
-		sizeof(struct ack_header);
-	size_t cmd_buffer_size = sizeof(struct command_header) +
-		sizeof(struct read_mem_cmd_payload);
-	size_t ack_buffer_size = sizeof(struct ack_header) +
-		transfer_size;
+	struct u3v_device *u3v = NULL;
+	struct device *dev = NULL;
+	int max_bytes_per_read = 0;
 	struct ack *ack = NULL;
 	struct pending_ack_payload *pending_ack = NULL;
 	int actual = 0;
 	int ret = 0;
 	int total_bytes_read = 0;
-	struct u3v_device *u3v = ctrl->u3v_dev;
-	struct device *dev = u3v->device;
 	bool request_acknowledged = false;
+	size_t cmd_buffer_size = sizeof(struct command_header) +
+		sizeof(struct read_mem_cmd_payload);
+	size_t ack_buffer_size = sizeof(struct ack_header) +
+		transfer_size;
 
 	if (bytes_read != NULL)
 		*bytes_read = 0;
@@ -241,6 +241,11 @@ int u3v_read_memory(struct u3v_control *ctrl, __u32 transfer_size,
 
 	if (ctrl == NULL)
 		return U3V_ERR_NO_CONTROL_INTERFACE;
+
+	max_bytes_per_read = ctrl->max_ack_transfer_size -
+		sizeof(struct ack_header);
+	u3v = ctrl->u3v_dev;
+	dev = u3v->device;
 
 	if (kernel_buffer == NULL && user_buffer == NULL) {
 		dev_err(dev, "%s: No valid buffer provided to read_memory\n",
@@ -307,10 +312,17 @@ int u3v_read_memory(struct u3v_control *ctrl, __u32 transfer_size,
 
 		request_acknowledged = false;
 		while (!request_acknowledged) {
-			/* reset */
+			/* Reset.
+			 * Ensure that we have enough room for a
+			 * pending_ack_payload (e.g. if we try to
+			 * read only two bytes then we would not be
+			 * able to receive a pending_ack_payload,
+			 * which has a size greater than 2 bytes).
+			 */
 			actual = 0;
 			ack_buffer_size = sizeof(struct ack_header) +
-				bytes_this_iteration;
+				max((size_t)(bytes_this_iteration),
+				sizeof(struct pending_ack_payload));
 			memset(ctrl->ack_buffer, 0, ack_buffer_size);
 
 			/* read the ack */
@@ -447,31 +459,41 @@ int u3v_write_memory(struct u3v_control *ctrl, __u32 transfer_size,
 	__u32 *bytes_written, __u64 address, const void *kernel_buffer,
 	const void *user_buffer)
 {
+	struct u3v_device *u3v = NULL;
+	struct device *dev = NULL;
+	int max_bytes_per_write = 0;
 	int ret = 0;
 	int total_bytes_written = 0;
-	const int max_bytes_per_write = ctrl->max_cmd_transfer_size -
-		(sizeof(struct command_header) +
-		 sizeof(struct write_mem_cmd_payload));
 	size_t cmd_buffer_size = sizeof(struct command_header) +
 		sizeof(struct read_mem_cmd_payload);
+	/*
+	 * Ensure that our acknowledge buffer is big enough to hold either a
+	 * write_mem_ack_payload or a pending_ack_payload because we don't know
+	 * for sure which one we will get.
+	 */
 	size_t ack_buffer_size = sizeof(struct ack_header) +
-		sizeof(struct write_mem_ack_payload);
+		max(sizeof(struct write_mem_ack_payload),
+		sizeof(struct pending_ack_payload));
 	struct ack *ack = NULL;
 	struct pending_ack_payload *pending_ack = NULL;
 	struct write_mem_ack_payload *write_mem_ack = NULL;
-	int actual;
-	struct u3v_device *u3v = ctrl->u3v_dev;
-	struct device *dev = u3v->device;
 	bool request_acknowledged = false;
+	int actual = 0;
+
+	if (ctrl == NULL)
+		return U3V_ERR_NO_CONTROL_INTERFACE;
+
+	u3v = ctrl->u3v_dev;
+	dev = u3v->device;
+	max_bytes_per_write = ctrl->max_cmd_transfer_size -
+		(sizeof(struct command_header) +
+		 sizeof(struct write_mem_cmd_payload));
 
 	if (bytes_written != NULL)
 		*bytes_written = 0;
 
 	if (transfer_size == 0)
 		return 0;
-
-	if (ctrl == NULL)
-		return U3V_ERR_NO_CONTROL_INTERFACE;
 
 	if (ack_buffer_size > ctrl->max_ack_transfer_size) {
 		dev_err(dev,
