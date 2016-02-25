@@ -53,16 +53,14 @@ struct u3v_control {
 
 int u3v_create_control(struct u3v_device *u3v);
 
-int u3v_read_memory(struct u3v_control *ctrl, __u32 transfer_size,
-	__u32 *bytes_read, __u64 address, void *kernel_buffer,
-	void *user_buffer);
+int u3v_read_memory(struct u3v_control *ctrl, u32 transfer_size,
+	u32 *bytes_read, u64 address, void *buffer);
 
-int u3v_write_memory(struct u3v_control *ctrl, __u32 transfer_size,
-	__u32 *bytes_written, __u64 address, const void *kernel_buffer,
-	const void *user_buffer);
+int u3v_write_memory(struct u3v_control *ctrl, u32 transfer_size,
+	u32 *bytes_written, u64 address, const void *buffer);
 
-int u3v_control_msg(struct usb_device *udev, __u8 request, __u8 requesttype,
-	__u16 value, __u16 index, void *data, __u16 size);
+int u3v_control_msg(struct usb_device *udev, u8 request, u8 requesttype,
+	u16 value, u16 index, void __user *u_data, u16 size);
 
 void u3v_destroy_control(struct u3v_device *u3v);
 

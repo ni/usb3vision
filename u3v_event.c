@@ -61,16 +61,16 @@ struct event_callback_context {
 	struct event_entry *event_entry;
 };
 
-static int configure_events(struct u3v_event *event, __u32 event_max_transfer,
-		     __u32 event_queue_depth);
+static int configure_events(struct u3v_event *event, u32 event_max_transfer,
+	u32 event_queue_depth);
 static void unconfigure_events(struct u3v_event *event);
 static int queue_urbs(struct u3v_event *event);
 static void abort_urbs(struct u3v_event *event);
 static int queue_next_event(struct u3v_event *event);
 static int submit_event_urb(struct u3v_event *event, struct event_entry *entry);
 static void event_urb_completion(struct urb *purb);
-static int transfer_event_data(struct u3v_event *event, void *user_buffer,
-			  __u32 *buffer_size, void *event_complete_buffer);
+static int transfer_event_data(struct u3v_event *event, void __user *u_buffer,
+	__u32 __user *u_buffer_size, void __user *u_event_complete_buffer);
 
 
 /*
@@ -83,7 +83,7 @@ static int transfer_event_data(struct u3v_event *event, void *user_buffer,
  *		       the queue
  */
 int u3v_create_events(struct u3v_device *u3v, struct usb_interface *intf,
-	__u32 event_max_transfer, __u32 event_queue_depth)
+	u32 event_max_transfer, u32 event_queue_depth)
 {
 	struct u3v_event *event = NULL;
 	int ret = 0;
@@ -137,8 +137,8 @@ int u3v_create_events(struct u3v_device *u3v, struct usb_interface *intf,
  * @event_queue_depth: the number of event entries to create and place in
  *		       the queue
  */
-static int configure_events(struct u3v_event *event, __u32 event_max_transfer,
-	      __u32 event_queue_depth)
+static int configure_events(struct u3v_event *event, u32 event_max_transfer,
+	u32 event_queue_depth)
 {
 	int i;
 	struct event_entry *entry;
@@ -452,19 +452,20 @@ static void event_urb_completion(struct urb *purb)
 
 	/* check status */
 	if (purb->status &&
-		!(purb->status == -ENOENT ||
-		  purb->status == -ECONNRESET ||
-		  purb->status == -ESHUTDOWN ||
-		  purb->status == -EPROTO)) {
-		dev_err(dev, "%s: Received nonzero urb completion status: %d",
+	  !(purb->status == -ENOENT ||
+	    purb->status == -ECONNRESET ||
+	    purb->status == -ESHUTDOWN ||
+	    purb->status == -EPROTO)) {
+		dev_err(dev,
+			"%s: Received nonzero urb completion status: %d",
 			__func__, purb->status);
 	}
 
 	entry = (struct event_entry *)(purb->context);
 	if (entry == NULL) {
 		dev_err(dev, "%s: Received a NULL context pointer\n",
-			__func__);
-		return;
+		__func__);
+	return;
 	}
 	/* Ensure buffer was queued */
 	WARN_ON(entry->state != event_queued);
@@ -480,14 +481,14 @@ static void event_urb_completion(struct urb *purb)
  * then copies the payload into the provided buffer
  *
  * @event: pointer to event interface struct
- * @user_buffer: the event payload will be copied into this buffer
- * @buffer_size: the size of the user_buffer on input, actual size
+ * @u_buffer: the event payload will be copied into this buffer
+ * @u_buffer_size: the size of the user_buffer on input, actual size
  *		 of the data copied on return
- * @event_complete_buffer: additional data describing the completed event,
+ * @u_event_complete_buffer: additional data describing the completed event,
  *		          can be NULL
  */
-int u3v_wait_for_event(struct u3v_event *event, void *user_buffer,
-		   __u32 *buffer_size, void *event_complete_buffer)
+int u3v_wait_for_event(struct u3v_event *event, void __user *u_buffer,
+	__u32 __user *u_buffer_size, void __user *u_event_complete_buffer)
 {
 	struct device *dev;
 	struct event_entry *entry;
@@ -499,13 +500,13 @@ int u3v_wait_for_event(struct u3v_event *event, void *user_buffer,
 
 	dev = event->u3v_dev->device;
 
-	if (user_buffer == NULL) {
-		dev_err(dev, "%s: user_buffer cannot be NULL\n", __func__);
+	if (u_buffer == NULL) {
+		dev_err(dev, "%s: u_buffer cannot be NULL\n", __func__);
 		return -EINVAL;
 	}
 
-	if (buffer_size == NULL) {
-		dev_err(dev, "%s: buffer_size cannot be NULL\n", __func__);
+	if (u_buffer_size == NULL) {
+		dev_err(dev, "%s: u_buffer_size cannot be NULL\n", __func__);
 		return -EINVAL;
 	}
 
@@ -520,7 +521,7 @@ int u3v_wait_for_event(struct u3v_event *event, void *user_buffer,
 		goto exit;
 	}
 	entry = list_first_entry(&event->event_queue,
-				 struct event_entry, list_elem);
+		struct event_entry, list_elem);
 
 	/* Ensure that we are waiting on a queued event */
 	if (entry->state == event_idle) {
@@ -554,18 +555,18 @@ int u3v_wait_for_event(struct u3v_event *event, void *user_buffer,
 		/* check if we were interrupted by a signal */
 		if (ret != 0) {
 			dev_dbg(dev, "%s: wait interrupted by signal\n",
-				__func__);
+			__func__);
 			ret = U3V_ERR_EVENT_WAIT_CANCELED;
 			goto exit;
 		}
 
 		/* check if device was removed or wait cancelled somehow */
 		if (!event->u3v_dev->device_connected ||
-			!event->started ||
-			entry->callback_status == -ENOENT ||
-			entry->callback_status == -ECONNRESET ||
-			entry->callback_status == -ESHUTDOWN ||
-			entry->callback_status == -EPROTO) {
+		   !event->started ||
+		    entry->callback_status == -ENOENT ||
+		    entry->callback_status == -ECONNRESET ||
+		    entry->callback_status == -ESHUTDOWN ||
+		    entry->callback_status == -EPROTO) {
 
 			dev_dbg(dev, "%s: Event interface was stopped\n",
 				__func__);
@@ -582,8 +583,8 @@ int u3v_wait_for_event(struct u3v_event *event, void *user_buffer,
 		}
 		event_ready = (entry->state == event_complete);
 	}
-	ret = transfer_event_data(event, user_buffer, buffer_size,
-			     event_complete_buffer);
+	ret = transfer_event_data(event, u_buffer, u_buffer_size,
+		u_event_complete_buffer);
 
 exit:
 	event->wait_in_progress = false;
@@ -598,25 +599,25 @@ exit:
  *	not NULL
  *
  * @event: pointer to event interface struct
- * @user_buffer: the event payload will be copied into this buffer
- * @buffer_size: the size of the user_buffer on input, actual size
- *		 of the data copied on return
- * @event_complete_buffer: additional data describing the completed event,
- *		          can be NULL
+ * @u_buffer: the event payload will be copied into this buffer
+ * @u_buffer_size: the size of the user_buffer on input, actual size
+ *	of the data copied on return
+ * @u_event_complete_buffer: additional data describing the completed event,
+ *	can be NULL
  */
-static int transfer_event_data(struct u3v_event *event, void *user_buffer,
-			  __u32 *buffer_size, void *event_complete_buffer)
+static int transfer_event_data(struct u3v_event *event, void __user *u_buffer,
+	__u32 __user *u_buffer_size, void __user *u_event_complete_buffer)
 {
 	struct command *cmd;
 	struct event_entry *entry;
 	struct device *dev;
 	struct event_complete_data ecd;
-	u32 k_buffer_size = 0;
+	u32 buffer_size = 0;
 	int ret;
 
 	dev = event->u3v_dev->device;
 	entry = list_first_entry(&event->event_queue,
-			   struct event_entry, list_elem);
+		struct event_entry, list_elem);
 
 	/* Ensure we received a valid event command */
 	cmd = (struct command *)(entry->buffer);
@@ -642,8 +643,8 @@ static int transfer_event_data(struct u3v_event *event, void *user_buffer,
 	}
 
 	/* Fill in the event buffer with the payload data */
-	k_buffer_size = min(entry->buffer_received_size, entry->buffer_size);
-	ret = copy_to_user(user_buffer, cmd, k_buffer_size);
+	buffer_size = min(entry->buffer_received_size, entry->buffer_size);
+	ret = copy_to_user(u_buffer, cmd, buffer_size);
 
 	/*
 	 * If unsuccessful, ret will contain the number of bytes
@@ -651,17 +652,17 @@ static int transfer_event_data(struct u3v_event *event, void *user_buffer,
 	 */
 	if (ret != 0) {
 		dev_err(dev, "%s: Error copying to user buffer\n", __func__);
-		k_buffer_size = k_buffer_size - ret;
+		buffer_size = buffer_size - ret;
 		ret = U3V_ERR_INTERNAL;
 		goto exit;
 	}
 
 	/* Fill in event complete data buffer if necessary */
-	if (event_complete_buffer != NULL) {
+	if (u_event_complete_buffer != NULL) {
 		ecd.structure_size = sizeof(ecd);
 		ecd.event_callback_status = entry->callback_status;
 		ecd.overwritten_event_count = event->overwritten_event_count;
-		ret = copy_to_user(event_complete_buffer, &ecd,
+		ret = copy_to_user(u_event_complete_buffer, &ecd,
 			ecd.structure_size);
 		if (ret != 0) {
 			dev_err(dev, "%s: Error copying event data\n",
@@ -674,6 +675,6 @@ static int transfer_event_data(struct u3v_event *event, void *user_buffer,
 	if (event->started)
 		ret = queue_next_event(event);
 exit:
-	put_user(k_buffer_size, buffer_size);
+	put_user(buffer_size, u_buffer_size);
 	return ret;
 }

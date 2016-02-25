@@ -42,6 +42,7 @@
 
 #include <linux/ioctl.h>
 #include <linux/usb.h>
+#include <linux/usb/hcd.h>
 #include <linux/kernel.h>
 #include <linux/kref.h>
 
@@ -122,6 +123,8 @@ struct u3v_device_info {
 	u32 os_max_transfer_size;
 	u64 sirm_addr;
 	u32 transfer_alignment;
+	u32 segmented_xfer_supported;
+	u32 segmented_xfer_enabled;
 };
 
 /* Helper functions for interfaces */
@@ -145,7 +148,33 @@ static inline struct u3v_device *u3v_get_driver_data(struct device *dev)
 		return NULL;
 
 	intf = to_usb_interface(dev);
-	return (intf ? usb_get_intfdata(intf) : NULL);
+	return intf ? usb_get_intfdata(intf) : NULL;
 }
+
+/* Helper function for checking hcd */
+static inline bool hcd_is_xhci(struct usb_device *udev)
+{
+	const char *hcd = bus_to_hcd(udev->bus)->driver->description;
+	return (strncmp(hcd, "xhci_hcd", 8) == 0);
+}
+
+#define GET_INTERFACE(ptr_type, ptr, interface_info)		\
+do {								\
+	mutex_lock(&interface_info.interface_lock);		\
+	mutex_lock(&interface_info.ioctl_count_lock);		\
+	ptr = (ptr_type)(interface_info.interface_ptr);		\
+	if (interface_info.ioctl_count++ == 0)			\
+		u3v_reinit_completion(&interface_info.ioctl_complete);	\
+	mutex_unlock(&interface_info.ioctl_count_lock);		\
+	mutex_unlock(&interface_info.interface_lock);		\
+} while (0)
+
+#define PUT_INTERFACE(interface_info)				\
+do {								\
+	mutex_lock(&interface_info.ioctl_count_lock);		\
+	if (--interface_info.ioctl_count == 0)			\
+		complete_all(&interface_info.ioctl_complete);	\
+	mutex_unlock(&interface_info.ioctl_count_lock);		\
+} while (0)
 
 #endif /*  _U3V_H_ */

@@ -35,13 +35,15 @@
 #define _U3V_STREAM_H_
 
 #include "u3v.h"
+#include "u3v_shared.h"
 #include <linux/completion.h>
 #include <linux/mutex.h>
 #include <linux/rbtree.h>
 
 
 struct u3v_stream_buffer_config {
-	u64 image_buffer_size;
+	u64 host_image_buffer_size;
+	u64 device_image_buffer_size;
 	u64 chunk_data_buffer_size;
 	u32 max_leader_size;
 	u32 max_trailer_size;
@@ -50,6 +52,11 @@ struct u3v_stream_buffer_config {
 	u32 transfer1_size;
 	u32 transfer2_size;
 	u32 transfer2_data_size;
+	u32 max_pglist_count;
+	u32 alignment_padding;
+	u32 segment_padding;
+	u64 segment_size;
+	bool sg_constraint;
 };
 
 struct u3v_stream {
@@ -62,25 +69,24 @@ struct u3v_stream {
 	struct u3v_stream_buffer_config config;
 };
 
-
 int u3v_create_stream(struct u3v_device *u3v, struct usb_interface *intf,
-	u64 image_buffer_size, u64 chunk_data_buffer_size,
-	u32 max_leader_size, u32 max_trailer_size, u32 payload_size,
-	u32 payload_count, u32 transfer1_size, u32 transfer2_size);
+	struct u3v_configure_stream2 *config_stream, u32 req_leader_size,
+	u32 req_trailer_size);
 
 int u3v_destroy_stream(struct u3v_device *u3v);
 
-int u3v_configure_buffer(struct u3v_stream *stream, void *user_image_buffer,
-	void *user_chunk_data_buffer, __u64 *buffer_id);
+int u3v_configure_buffer(struct u3v_stream *stream,
+	void __user *u_image_buffer, void __user *u_chunk_data_buffer,
+	__u64 __user *u_buffer_id);
 
-int u3v_unconfigure_buffer(struct u3v_stream *stream, __u64 buffer_id);
+int u3v_unconfigure_buffer(struct u3v_stream *stream, u64 buffer_id);
 
-int u3v_queue_buffer(struct u3v_stream *stream, __u64 buffer_id);
+int u3v_queue_buffer(struct u3v_stream *stream, u64 buffer_id);
 
-int u3v_wait_for_buffer(struct u3v_stream *stream, __u64 buffer_id,
-	void *user_leader_buffer, __u32 *leader_size,
-	void *user_trailer_buffer, __u32 *trailer_size,
-	void *buffer_complete_data);
+int u3v_wait_for_buffer(struct u3v_stream *stream, u64 buffer_id,
+	void __user *u_leader_buffer, __u32 __user *u_leader_size,
+	void __user *u_trailer_buffer, __u32 __user *u_trailer_size,
+	void __user *u_buffer_complete_data);
 
 int u3v_cancel_all_buffers(struct u3v_stream *stream);
 #endif

@@ -55,12 +55,12 @@ struct u3v_event {
 };
 
 int u3v_create_events(struct u3v_device *u3v, struct usb_interface *intf,
-	__u32 event_max_transfer, __u32 event_queue_depth);
+	u32 event_max_transfer, u32 event_queue_depth);
 
 int u3v_start_events(struct u3v_event *event);
 
-int u3v_wait_for_event(struct u3v_event *event, void *user_buffer,
-		   __u32 *buffer_size, void *event_complete_buffer);
+int u3v_wait_for_event(struct u3v_event *event, void __user *u_buffer,
+	__u32 __user *u_buffer_size, void __user *u_event_complete_buffer);
 
 void u3v_stop_events(struct u3v_event *event);
 

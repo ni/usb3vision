@@ -72,6 +72,7 @@
 #define U3V_ERR_MAX_CURRENT_INVALID			(U3V_ERR_BASE + 0x001F)
 #define U3V_ERR_IMAGE_SIZE_NOT_ALIGNED			(U3V_ERR_BASE + 0x0020)
 #define U3V_ERR_CHUNK_DATA_SIZE_TOO_BIG			(U3V_ERR_BASE + 0x0021)
+#define U3V_ERR_SEGMENTED_XFER_NOT_AVAIL		(U3V_ERR_BASE + 0x0022)
 #define U3V_ERR_MAX_RANGE				(U3V_ERR_BASE + 0xFFFF)
 
 #define U3V_CONTROL_PREFIX 0x43563355
@@ -299,38 +300,48 @@ struct event_complete_data {
 /* Request values for U3V driver's ioctl entry point */
 struct u3v_read_memory {
 	__u64 address;
-	void *user_buffer;
+	void __user *u_buffer;
 	__u32 transfer_size;
-	__u32 *bytes_read;
+	__u32 __user *u_bytes_read;
 };
 
 struct u3v_write_memory {
 	__u64 address;
-	const void *user_buffer;
+	const void __user *u_buffer;
 	__u32 transfer_size;
-	__u32 *bytes_written;
+	__u32 __user *u_bytes_written;
 };
 
 struct u3v_get_stream_alignment {
-	__u32 *stream_alignment;
+	__u32 __user *u_stream_alignment;
 };
 
 struct u3v_get_os_max_transfer {
-	__u32 *os_max_transfer_size;
+	__u32 __user *u_os_max_transfer_size;
 };
 
 struct u3v_configure_stream {
 	__u64 image_buffer_size;
 	__u64 chunk_data_buffer_size;
 	__u32 max_urb_size;
-	__u32 *max_leader_size;
-	__u32 *max_trailer_size;
+	__u32 __user *u_max_leader_size;
+	__u32 __user *u_max_trailer_size;
+};
+
+struct u3v_configure_stream2 {
+	__u64 image_buffer_size;
+	__u64 chunk_data_buffer_size;
+	__u32 max_urb_size;
+	__u32 segment_padding;
+	__u64 segment_size;
+	__u32 __user *u_max_leader_size;
+	__u32 __user *u_max_trailer_size;
 };
 
 struct u3v_configure_buffer {
-	void *user_image_buffer;
-	void *user_chunk_data_buffer;
-	__u64 *buffer_handle;
+	void __user *u_image_buffer;
+	void __user *u_chunk_data_buffer;
+	__u64 __user *u_buffer_handle;
 };
 
 struct u3v_unconfigure_buffer {
@@ -343,11 +354,11 @@ struct u3v_queue_buffer {
 
 struct u3v_wait_for_buffer {
 	__u64 buffer_handle;
-	void *user_leader_buffer;
-	__u32 *leader_size;
-	void *user_trailer_buffer;
-	__u32 *trailer_size;
-	void *buffer_complete_data;
+	void __user *u_leader_buffer;
+	__u32 __user *u_leader_size;
+	void __user *u_trailer_buffer;
+	__u32 __user *u_trailer_size;
+	void __user *u_buffer_complete_data;
 };
 
 struct u3v_control_msg {
@@ -355,7 +366,7 @@ struct u3v_control_msg {
 	__u8 request_type;
 	__u16 value;
 	__u16 index;
-	void *data;
+	void __user *u_data;
 	__u16 size;
 };
 
@@ -365,9 +376,9 @@ struct u3v_start_events {
 };
 
 struct u3v_wait_for_event {
-	void *user_buffer;
-	__u32 *buffer_size;
-	void *event_complete_buffer;
+	void __user *u_buffer;
+	__u32 __user *u_buffer_size;
+	void __user *u_event_complete_buffer;
 };
 
 /*
@@ -378,10 +389,10 @@ struct u3v_wait_for_event {
 #define U3V_MAGIC			0x5D
 
 #define U3V_IOCTL_READ			\
-	_IOR(U3V_MAGIC, 1, struct u3v_read_memory)
+	_IOWR(U3V_MAGIC, 1, struct u3v_read_memory)
 
 #define U3V_IOCTL_WRITE			\
-	_IOW(U3V_MAGIC, 2, struct u3v_write_memory)
+	_IOWR(U3V_MAGIC, 2, struct u3v_write_memory)
 
 #define U3V_IOCTL_GET_STREAM_ALIGNMENT	\
 	_IOR(U3V_MAGIC, 3, struct u3v_get_stream_alignment)
@@ -390,13 +401,13 @@ struct u3v_wait_for_event {
 	_IOR(U3V_MAGIC, 4, struct u3v_get_os_max_transfer)
 
 #define U3V_IOCTL_CONFIGURE_STREAM	\
-	_IOR(U3V_MAGIC, 5, struct u3v_configure_stream)
+	_IOWR(U3V_MAGIC, 5, struct u3v_configure_stream)
 
 #define U3V_IOCTL_UNCONFIGURE_STREAM	\
 	_IO(U3V_MAGIC, 6)
 
 #define U3V_IOCTL_CONFIGURE_BUFFER	\
-	_IOR(U3V_MAGIC, 7, struct u3v_configure_buffer)
+	_IOWR(U3V_MAGIC, 7, struct u3v_configure_buffer)
 
 #define U3V_IOCTL_UNCONFIGURE_BUFFER	\
 	_IOW(U3V_MAGIC, 8, struct u3v_unconfigure_buffer)
@@ -405,23 +416,26 @@ struct u3v_wait_for_event {
 	_IOW(U3V_MAGIC, 9, struct u3v_queue_buffer)
 
 #define U3V_IOCTL_WAIT_FOR_BUFFER	\
-	_IOR(U3V_MAGIC, 10, struct u3v_wait_for_buffer)
+	_IOWR(U3V_MAGIC, 10, struct u3v_wait_for_buffer)
 
 #define U3V_IOCTL_CANCEL_ALL_BUFFERS	\
 	_IO(U3V_MAGIC, 11)
 
 #define U3V_IOCTL_CTRL_MSG		\
-	_IOR(U3V_MAGIC, 12, struct u3v_control_msg)
+	_IOWR(U3V_MAGIC, 12, struct u3v_control_msg)
 
 #define U3V_IOCTL_START_EVENTS		\
 	_IOW(U3V_MAGIC, 13, struct u3v_start_events)
 
 #define U3V_IOCTL_WAIT_FOR_EVENT	\
-	_IOR(U3V_MAGIC, 14, struct u3v_wait_for_event)
+	_IOWR(U3V_MAGIC, 14, struct u3v_wait_for_event)
 
 #define U3V_IOCTL_STOP_EVENTS		\
 	_IO(U3V_MAGIC, 15)
 
-#define U3V_MAX_NR			15
+#define U3V_IOCTL_CONFIGURE_STREAM2	\
+	_IOWR(U3V_MAGIC, 16, struct u3v_configure_stream2)
+
+#define U3V_MAX_NR			16
 
 #endif /* _U3V_SHARED_H */

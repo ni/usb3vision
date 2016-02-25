@@ -47,9 +47,13 @@
 #include <linux/types.h>
 #include <linux/uaccess.h>
 #include <linux/usb.h>
-#include <linux/usb/hcd.h>
-#include <linux/version.h>
 #include <asm/unaligned.h>
+#ifdef VERSION_COMPATIBILITY
+	#include <linux/version.h>
+#else
+	#include <generated/uapi/linux/version.h>
+#endif
+
 
 enum direction_t {
 	dir_in,
@@ -76,41 +80,20 @@ static int initialize(struct u3v_device *u3v);
 static int get_stream_capabilities(struct u3v_device *u3v);
 
 /* device level ioctls and helper functions*/
-static int u3v_get_os_max_transfer_size(struct u3v_device *u3v, __u32 *os_max);
-static int u3v_get_stream_alignment(struct u3v_device *u3v, __u32 *alignment);
+static int u3v_get_os_max_transfer_size(struct u3v_device *u3v,
+	__u32 __user *u_os_max);
+static int u3v_get_stream_alignment(struct u3v_device *u3v,
+	__u32 __user *u_alignment);
 static int u3v_configure_stream(struct u3v_device *u3v,
-	__u64 image_buffer_size, __u64 chunk_data_buffer_size,
-	__u32 max_urb_size, __u32 *max_leader_size, __u32 *max_trailer_size);
+	struct u3v_configure_stream2 *config_stream);
 static int read_stream_registers(struct u3v_device *u3v,
 	u32 *req_leader_size, u32 *req_trailer_size);
-static int write_stream_registers(struct u3v_device *u3v,
-	u32 max_leader_size, u32 max_trailer_size, u32 payload_size,
-	u32 payload_count, u32 transfer1_size, u32 transfer2_size);
-static u64 compatibility_div(u64 dividend, u32 divisor);
-static u32 compatibility_mod(u64 dividend, u32 divisor);
+static int write_stream_registers(struct u3v_device *u3v);
 
 /* helper function for reset_pipe */
 static int reset_endpoint(struct u3v_device *u3v,
 	struct usb_endpoint_descriptor *ep);
 
-#define GET_INTERFACE(ptr_type, ptr, interface_info)		\
-do {								\
-	mutex_lock(&interface_info.interface_lock);		\
-	mutex_lock(&interface_info.ioctl_count_lock);		\
-	ptr = (ptr_type)(interface_info.interface_ptr);		\
-	if (interface_info.ioctl_count++ == 0)			\
-		u3v_reinit_completion(&interface_info.ioctl_complete);	\
-	mutex_unlock(&interface_info.ioctl_count_lock);		\
-	mutex_unlock(&interface_info.interface_lock);		\
-} while (0)
-
-#define PUT_INTERFACE(interface_info)				\
-do {								\
-	mutex_lock(&interface_info.ioctl_count_lock);		\
-	if (--interface_info.ioctl_count == 0)			\
-		complete_all(&interface_info.ioctl_complete);	\
-	mutex_unlock(&interface_info.ioctl_count_lock);		\
-} while (0)
 
 /* sysfs attribute configuration */
 
@@ -126,6 +109,33 @@ static ssize_t name##_show(struct device *dev,				\
 	return scnprintf(buf, PAGE_SIZE, "%u\n", u3v->u3v_info->name);	\
 }									\
 static DEVICE_ATTR(name, S_IRUGO, name##_show, NULL);
+
+#define u3v_attribute_num_rw(name)					\
+static ssize_t name##_show(struct device *dev,				\
+	struct device_attribute *attr, char *buf)			\
+{									\
+	struct u3v_device *u3v = u3v_get_driver_data(dev);		\
+									\
+	if (u3v == NULL || u3v->u3v_info == NULL)			\
+		return -ENODEV;						\
+									\
+	return scnprintf(buf, PAGE_SIZE, "%u\n", u3v->u3v_info->name);	\
+}									\
+static ssize_t name##_store(struct device *dev,				\
+	struct device_attribute *attr, const char *buf, size_t count)	\
+{									\
+	struct u3v_device *u3v = u3v_get_driver_data(dev);		\
+	int ret = 0;							\
+	if (u3v == NULL || u3v->u3v_info == NULL)			\
+		return -ENODEV;						\
+									\
+	ret = kstrtou32(buf, 10, &u3v->u3v_info->name);			\
+	if (ret < 0)							\
+		return ret;						\
+									\
+	return count;							\
+}									\
+static DEVICE_ATTR(name, S_IWUGO | S_IRUGO, name##_show, name##_store);
 
 #define u3v_attribute_str(name)						\
 static ssize_t name##_show(struct device *dev,				\
@@ -186,6 +196,8 @@ u3v_attribute_num(speed_support);
 u3v_attribute_num(previously_initialized);
 u3v_attribute_num(host_byte_alignment);
 u3v_attribute_num(os_max_transfer_size);
+u3v_attribute_num(segmented_xfer_supported);
+u3v_attribute_num_rw(segmented_xfer_enabled);
 
 static struct attribute *u3v_attrs[] = {
 	&dev_attr_idVendor.attr,
@@ -207,6 +219,8 @@ static struct attribute *u3v_attrs[] = {
 	&dev_attr_previously_initialized.attr,
 	&dev_attr_host_byte_alignment.attr,
 	&dev_attr_os_max_transfer_size.attr,
+	&dev_attr_segmented_xfer_supported.attr,
+	&dev_attr_segmented_xfer_enabled.attr,
 	NULL,
 };
 
@@ -271,25 +285,30 @@ static struct usb_driver u3v_driver = {
  */
 static long u3v_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
-	struct u3v_read_memory *read_req;
-	struct u3v_write_memory *write_req;
-	struct u3v_get_stream_alignment *align;
-	struct u3v_get_os_max_transfer *os_max;
-	struct u3v_configure_stream *config_stream;
-	struct u3v_configure_buffer *config_req;
-	struct u3v_unconfigure_buffer *unconfig_req;
-	struct u3v_queue_buffer *queue_req;
-	struct u3v_wait_for_buffer *wait_req;
-	struct u3v_control_msg *ctrl_msg;
-	struct u3v_start_events *start_events;
-	struct u3v_wait_for_event *wait_event;
-	struct u3v_device *u3v;
-	struct u3v_control *control;
-	struct u3v_event *event;
-	struct u3v_stream *stream;
-	struct device *dev;
+	struct u3v_read_memory *read_req = NULL;
+	struct u3v_write_memory *write_req = NULL;
+	struct u3v_get_stream_alignment *align = NULL;
+	struct u3v_get_os_max_transfer *os_max = NULL;
+	struct u3v_configure_stream *config_stream = NULL;
+	struct u3v_configure_stream2 *config_stream2 = NULL;
+	struct u3v_configure_buffer *config_req = NULL;
+	struct u3v_unconfigure_buffer *unconfig_req = NULL;
+	struct u3v_queue_buffer *queue_req = NULL;
+	struct u3v_wait_for_buffer *wait_req = NULL;
+	struct u3v_control_msg *ctrl_msg = NULL;
+	struct u3v_start_events *start_events = NULL;
+	struct u3v_wait_for_event *wait_event = NULL;
+	struct u3v_device *u3v = NULL;
+	struct u3v_control *control = NULL;
+	struct u3v_event *event = NULL;
+	struct u3v_stream *stream = NULL;
+	struct device *dev = NULL;
+	struct u3v_configure_stream2 config2;
+	void *argp = (void __user *)(arg);
+	void *buffer = NULL;
+	u32 bytes_read = 0;
+	u32 bytes_written = 0;
 	int ret = 0;
-	int err = 0;
 
 	if (!filp || !filp->private_data)
 		return -EINVAL;
@@ -301,7 +320,7 @@ static long u3v_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		return -ENODEV;
 
 	dev_vdbg(dev, "%s: cmd = %X, filp = %p, arg = %p\n",
-		__func__, cmd, filp, (void *)(arg));
+		__func__, cmd, filp, argp);
 
 	if (cmd != U3V_IOCTL_CTRL_MSG) {
 		ret = initialize(u3v);
@@ -315,77 +334,148 @@ static long u3v_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		return U3V_ERR_NOT_SUPPORTED;
 	}
 
-	/* Check safety of transfer between user and kernel space */
-	if (_IOC_DIR(cmd) & _IOC_READ)
-		err = !access_ok(VERIFY_WRITE, (void __user *)arg,
-			_IOC_SIZE(cmd));
-	else if (_IOC_DIR(cmd) & _IOC_WRITE)
-		err = !access_ok(VERIFY_READ, (void __user *)arg,
-			_IOC_SIZE(cmd));
-	if (err) {
-		dev_err(dev, "%s: Failure on access check for pointer %p",
-			__func__, (void *)(arg));
-		return -EFAULT;
-	}
-
 	switch (cmd) {
 	case U3V_IOCTL_READ:
-		read_req = (struct u3v_read_memory *)(arg);
-		if (!read_req)
-			goto error;
-
+		read_req = kmalloc(sizeof(struct u3v_read_memory),
+			GFP_KERNEL);
+		if (read_req == NULL)
+			return -ENOMEM;
+		ret = copy_from_user(read_req, argp,
+			sizeof(struct u3v_read_memory));
+		if (ret != 0) {
+			kfree(read_req);
+			return -EFAULT;
+		}
+		buffer = kzalloc(read_req->transfer_size, GFP_KERNEL);
+		if (buffer == NULL)
+			return -ENOMEM;
 		GET_INTERFACE(struct u3v_control *, control,
 			u3v->control_info);
 		ret = u3v_read_memory(control,
-			read_req->transfer_size,
-			read_req->bytes_read,
-			read_req->address, NULL,
-			read_req->user_buffer);
+			read_req->transfer_size, &bytes_read,
+			read_req->address, buffer);
+		if (ret == 0) {
+			put_user(bytes_read, read_req->u_bytes_read);
+			ret = copy_to_user(read_req->u_buffer, buffer,
+				bytes_read);
+		}
 		PUT_INTERFACE(u3v->control_info);
+		kfree(buffer);
+		kfree(read_req);
 		break;
 	case U3V_IOCTL_WRITE:
-		write_req = (struct u3v_write_memory *)(arg);
-		if (!write_req)
-			goto error;
-
+		write_req = kmalloc(sizeof(struct u3v_write_memory),
+			GFP_KERNEL);
+		if (write_req == NULL)
+			return -ENOMEM;
+		ret = copy_from_user(write_req, argp,
+			sizeof(struct u3v_write_memory));
+		if (ret != 0) {
+			kfree(write_req);
+			return -EFAULT;
+		}
+		buffer = kzalloc(write_req->transfer_size, GFP_KERNEL);
+		if (buffer == NULL)
+			return -ENOMEM;
+		ret = copy_from_user(buffer, write_req->u_buffer,
+			write_req->transfer_size);
+		if (ret != 0) {
+			kfree(buffer);
+			kfree(write_req);
+			return -EFAULT;
+		}
 		GET_INTERFACE(struct u3v_control *, control,
 			u3v->control_info);
 		ret = u3v_write_memory(control,
-			write_req->transfer_size,
-			write_req->bytes_written,
-			write_req->address, NULL,
-			write_req->user_buffer);
+			write_req->transfer_size, &bytes_written,
+			write_req->address, buffer);
+		if (ret == 0)
+			put_user(bytes_written, write_req->u_bytes_written);
+
 		PUT_INTERFACE(u3v->control_info);
+		kfree(buffer);
+		kfree(write_req);
 		break;
 	case U3V_IOCTL_GET_STREAM_ALIGNMENT:
-		align = (struct u3v_get_stream_alignment *)(arg);
-		if (!align)
-			goto error;
-
-		ret = u3v_get_stream_alignment(u3v, align->stream_alignment);
+		align = kmalloc(sizeof(struct u3v_get_stream_alignment),
+			GFP_KERNEL);
+		if (align == NULL)
+			return -ENOMEM;
+		ret = copy_from_user(align, argp,
+			sizeof(struct u3v_get_stream_alignment));
+		if (ret != 0) {
+			kfree(align);
+			return -EFAULT;
+		}
+		ret = u3v_get_stream_alignment(u3v, align->u_stream_alignment);
+		kfree(align);
 		break;
 	case U3V_IOCTL_GET_OS_MAX_TRANSFER:
-		os_max = (struct u3v_get_os_max_transfer *)(arg);
-		if (!os_max)
-			goto error;
-
+		os_max = kmalloc(sizeof(struct u3v_get_os_max_transfer),
+			GFP_KERNEL);
+		if (os_max == NULL)
+			return -ENOMEM;
+		ret = copy_from_user(os_max, argp,
+			sizeof(struct u3v_get_os_max_transfer));
+		if (ret != 0) {
+			kfree(os_max);
+			return -EFAULT;
+		}
 		ret = u3v_get_os_max_transfer_size(u3v,
-			os_max->os_max_transfer_size);
+			os_max->u_os_max_transfer_size);
+		kfree(os_max);
 		break;
 	case U3V_IOCTL_CONFIGURE_STREAM:
-		config_stream = (struct u3v_configure_stream *)(arg);
-		if (!config_stream)
-			goto error;
+		config_stream = kmalloc(sizeof(struct u3v_configure_stream),
+			GFP_KERNEL);
+		if (config_stream == NULL)
+			return -ENOMEM;
+		ret = copy_from_user(config_stream, argp,
+			sizeof(struct u3v_configure_stream));
+		if (ret != 0) {
+			kfree(config_stream);
+			return -EFAULT;
+		}
 		mutex_lock(&u3v->stream_info.interface_lock);
 
-		ret = u3v_configure_stream(u3v,
-			config_stream->image_buffer_size,
-			config_stream->chunk_data_buffer_size,
-			config_stream->max_urb_size,
-			config_stream->max_leader_size,
-			config_stream->max_trailer_size);
+		config2.image_buffer_size =
+			config_stream->image_buffer_size;
+		config2.chunk_data_buffer_size =
+			config_stream->chunk_data_buffer_size;
+		config2.max_urb_size =
+			config_stream->max_urb_size;
+		config2.segment_padding = 0;
+		config2.segment_size =
+			config_stream->image_buffer_size;
+		config2.u_max_leader_size =
+			config_stream->u_max_leader_size;
+		config2.u_max_trailer_size =
+			config_stream->u_max_trailer_size;
+
+		/*
+		 * for the old entry point we just call configure_stream
+		 * with segment_padding = 0 and segment_size = image size
+		 */
+		ret = u3v_configure_stream(u3v, &config2);
 
 		mutex_unlock(&u3v->stream_info.interface_lock);
+		kfree(config_stream);
+		break;
+	case U3V_IOCTL_CONFIGURE_STREAM2:
+		config_stream2 = kmalloc(sizeof(struct u3v_configure_stream2),
+			GFP_KERNEL);
+		if (config_stream2 == NULL)
+			return -ENOMEM;
+		ret = copy_from_user(config_stream2, argp,
+			sizeof(struct u3v_configure_stream2));
+		if (ret != 0) {
+			kfree(config_stream2);
+			return -EFAULT;
+		}
+		mutex_lock(&u3v->stream_info.interface_lock);
+		ret = u3v_configure_stream(u3v, config_stream2);
+		mutex_unlock(&u3v->stream_info.interface_lock);
+		kfree(config_stream2);
 		break;
 	case U3V_IOCTL_UNCONFIGURE_STREAM:
 		mutex_lock(&u3v->stream_info.interface_lock);
@@ -393,50 +483,78 @@ static long u3v_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		mutex_unlock(&u3v->stream_info.interface_lock);
 		break;
 	case U3V_IOCTL_CONFIGURE_BUFFER:
-		config_req = (struct u3v_configure_buffer *)(arg);
-		if (!config_req)
-			goto error;
-
+		config_req = kmalloc(sizeof(struct u3v_configure_buffer),
+			GFP_KERNEL);
+		if (config_req == NULL)
+			return -ENOMEM;
+		ret = copy_from_user(config_req, argp,
+			sizeof(struct u3v_configure_buffer));
+		if (ret != 0) {
+			kfree(config_req);
+			return -EFAULT;
+		}
 		GET_INTERFACE(struct u3v_stream *, stream, u3v->stream_info);
 		ret = u3v_configure_buffer(stream,
-			config_req->user_image_buffer,
-			config_req->user_chunk_data_buffer,
-			config_req->buffer_handle);
+			config_req->u_image_buffer,
+			config_req->u_chunk_data_buffer,
+			config_req->u_buffer_handle);
 		PUT_INTERFACE(u3v->stream_info);
+		kfree(config_req);
 		break;
 	case U3V_IOCTL_UNCONFIGURE_BUFFER:
-		unconfig_req = (struct u3v_unconfigure_buffer *)(arg);
-		if (!unconfig_req)
-			goto error;
-
+		unconfig_req = kmalloc(sizeof(struct u3v_unconfigure_buffer),
+			GFP_KERNEL);
+		if (unconfig_req == NULL)
+			return -ENOMEM;
+		ret = copy_from_user(unconfig_req, argp,
+			sizeof(struct u3v_unconfigure_buffer));
+		if (ret != 0) {
+			kfree(unconfig_req);
+			return -EFAULT;
+		}
 		GET_INTERFACE(struct u3v_stream *, stream, u3v->stream_info);
 		ret = u3v_unconfigure_buffer(stream,
 			unconfig_req->buffer_handle);
 		PUT_INTERFACE(u3v->stream_info);
+		kfree(unconfig_req);
 		break;
 	case U3V_IOCTL_QUEUE_BUFFER:
-		queue_req = (struct u3v_queue_buffer *)(arg);
-		if (!queue_req)
-			goto error;
-
+		queue_req = kmalloc(sizeof(struct u3v_queue_buffer),
+			GFP_KERNEL);
+		if (queue_req == NULL)
+			return -ENOMEM;
+		ret = copy_from_user(queue_req, argp,
+			sizeof(struct u3v_queue_buffer));
+		if (ret != 0) {
+			kfree(queue_req);
+			return -EFAULT;
+		}
 		GET_INTERFACE(struct u3v_stream *, stream, u3v->stream_info);
 		ret = u3v_queue_buffer(stream, queue_req->buffer_handle);
 		PUT_INTERFACE(u3v->stream_info);
+		kfree(queue_req);
 		break;
 	case U3V_IOCTL_WAIT_FOR_BUFFER:
-		wait_req = (struct u3v_wait_for_buffer *)(arg);
-		if (!wait_req)
-			goto error;
-
+		wait_req = kmalloc(sizeof(struct u3v_wait_for_buffer),
+			GFP_KERNEL);
+		if (wait_req == NULL)
+			return -ENOMEM;
+		ret = copy_from_user(wait_req, argp,
+			sizeof(struct u3v_wait_for_buffer));
+		if (ret != 0) {
+			kfree(wait_req);
+			return -EFAULT;
+		}
 		GET_INTERFACE(struct u3v_stream *, stream, u3v->stream_info);
 		ret = u3v_wait_for_buffer(stream,
 			wait_req->buffer_handle,
-			wait_req->user_leader_buffer,
-			wait_req->leader_size,
-			wait_req->user_trailer_buffer,
-			wait_req->trailer_size,
-			wait_req->buffer_complete_data);
+			wait_req->u_leader_buffer,
+			wait_req->u_leader_size,
+			wait_req->u_trailer_buffer,
+			wait_req->u_trailer_size,
+			wait_req->u_buffer_complete_data);
 		PUT_INTERFACE(u3v->stream_info);
+		kfree(wait_req);
 		break;
 	case U3V_IOCTL_CANCEL_ALL_BUFFERS:
 		GET_INTERFACE(struct u3v_stream *, stream, u3v->stream_info);
@@ -444,19 +562,33 @@ static long u3v_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		PUT_INTERFACE(u3v->stream_info);
 		break;
 	case U3V_IOCTL_CTRL_MSG:
-		ctrl_msg = (struct u3v_control_msg *)(arg);
-		if (!ctrl_msg)
-			goto error;
+		ctrl_msg = kmalloc(sizeof(struct u3v_control_msg),
+			GFP_KERNEL);
+		if (ctrl_msg == NULL)
+			return -ENOMEM;
+		ret = copy_from_user(ctrl_msg, argp,
+			sizeof(struct u3v_control_msg));
+		if (ret != 0) {
+			kfree(ctrl_msg);
+			return -EFAULT;
+		}
 		ret = u3v_control_msg(u3v->udev,
 			ctrl_msg->request, ctrl_msg->request_type,
 			ctrl_msg->value, ctrl_msg->index,
-			ctrl_msg->data, ctrl_msg->size);
+			ctrl_msg->u_data, ctrl_msg->size);
+		kfree(ctrl_msg);
 		break;
 	case U3V_IOCTL_START_EVENTS:
-		start_events = (struct u3v_start_events *)(arg);
-		if (!start_events)
-			goto error;
-
+		start_events = kmalloc(sizeof(struct u3v_start_events),
+			GFP_KERNEL);
+		if (start_events == NULL)
+			return -ENOMEM;
+		ret = copy_from_user(start_events, argp,
+			sizeof(struct u3v_start_events));
+		if (ret != 0) {
+			kfree(start_events);
+			return -EFAULT;
+		}
 		mutex_lock(&u3v->event_info.interface_lock);
 		ret = u3v_create_events(u3v, usb_ifnum_to_if(u3v->udev,
 			u3v->event_info.idx),
@@ -470,18 +602,26 @@ static long u3v_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 				u3v_destroy_events(u3v);
 		}
 		mutex_unlock(&u3v->event_info.interface_lock);
+		kfree(start_events);
 		break;
 	case U3V_IOCTL_WAIT_FOR_EVENT:
-		wait_event = (struct u3v_wait_for_event *)(arg);
-		if (!wait_event)
-			goto error;
-
+		wait_event = kmalloc(sizeof(struct u3v_wait_for_event),
+			GFP_KERNEL);
+		if (wait_event == NULL)
+			return -ENOMEM;
+		ret = copy_from_user(wait_event, argp,
+			sizeof(struct u3v_wait_for_event));
+		if (ret != 0) {
+			kfree(wait_event);
+			return -EFAULT;
+		}
 		GET_INTERFACE(struct u3v_event *, event, u3v->event_info);
 		ret = u3v_wait_for_event(event,
-			wait_event->user_buffer,
-			wait_event->buffer_size,
-			wait_event->event_complete_buffer);
+			wait_event->u_buffer,
+			wait_event->u_buffer_size,
+			wait_event->u_event_complete_buffer);
 		PUT_INTERFACE(u3v->event_info);
+		kfree(wait_event);
 		break;
 	case U3V_IOCTL_STOP_EVENTS:
 		mutex_lock(&u3v->event_info.interface_lock);
@@ -492,9 +632,6 @@ static long u3v_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		break;
 	}
 	return ret;
-error:
-	dev_err(dev, "%s: Received a NULL pointer as an argument\n", __func__);
-	return -EINVAL;
 }
 
 
@@ -600,7 +737,7 @@ static int get_stream_capabilities(struct u3v_device *u3v)
 
 	/* First get stream interface information */
 	ret = u3v_read_memory(control, sizeof(sbrm_address), &bytes_read,
-		ABRM_SBRM_ADDRESS, &sbrm_address, NULL);
+		ABRM_SBRM_ADDRESS, &sbrm_address);
 
 	if (ret != 0) {
 		dev_err(dev, "%s: Error reading SBRM address\n", __func__);
@@ -609,7 +746,7 @@ static int get_stream_capabilities(struct u3v_device *u3v)
 	/* Check capabilities to see if SIRM is available */
 	ret = u3v_read_memory(control, sizeof(u3v_capability),
 		&bytes_read, sbrm_address + SBRM_U3VCP_CAPABILITY,
-		&u3v_capability, NULL);
+		&u3v_capability);
 
 	if (ret != 0) {
 		dev_err(dev, "%s: Error reading U3VCP capability\n", __func__);
@@ -620,7 +757,7 @@ static int get_stream_capabilities(struct u3v_device *u3v)
 		ret = u3v_read_memory(control,
 			sizeof(u3v->u3v_info->sirm_addr),
 			&bytes_read, sbrm_address + SBRM_SIRM_ADDRESS,
-			&u3v->u3v_info->sirm_addr, NULL);
+			&u3v->u3v_info->sirm_addr);
 
 		if (ret != 0) {
 			dev_err(dev, "%s: Error reading SIRM address\n",
@@ -630,7 +767,7 @@ static int get_stream_capabilities(struct u3v_device *u3v)
 
 		ret = u3v_read_memory(control, sizeof(si_info),
 			&bytes_read, u3v->u3v_info->sirm_addr + SI_INFO,
-			&si_info, NULL);
+			&si_info);
 
 		if (ret != 0) {
 			dev_err(dev, "%s: Error reading SI info\n", __func__);
@@ -656,151 +793,39 @@ exit:
 /*
  * u3v_configure_stream - sets up the stream interface for the device
  * @u3v: pointer to the u3v_device struct
- * @image_buffer_size: the size of the buffers that will hold the image data.
- *	Could include size of both the image data and chunk data if they
- *	are to be acquired into the same buffer. Otherwise, it is just
- *	the size of the image data.
- * @chunk_data_buffer_size: the size of the buffers that will hold only
- *	chunk data. If the chunk data is acquired into the same buffer
- *	as the image data, this size should be 0.
- * @max_urb_size: this parameter can be used to limit the size of the
- *	URBs if necessary. If you want to use the max size supported
- *	by the OS, set this value to uint max
- * @max_leader_size: on return this will contain the size of the
- *	buffer that the caller must allocate to guarantee enough
- *	space to hold all of the leader data. This size will account
- *	for any alignment restrictions
- * @max_trailer_size: on return this will contain the size of the
- *	buffer that the caller must allocate to guarantee enough space
- *	to hold all of the trailer data. This size will account for
- *	any alignment restrictions.
+ * @config_stream: pointer to the struct with stream configuration data
+ *	from usermode
  */
 static int u3v_configure_stream(struct u3v_device *u3v,
-	__u64 image_buffer_size, __u64 chunk_data_buffer_size,
-	__u32 max_urb_size, __u32 *max_leader_size, __u32 *max_trailer_size)
+	struct u3v_configure_stream2 *config_stream)
 {
-	struct device *dev;
+	struct device *dev = NULL;
 	u32 req_leader_size = 0;
 	u32 req_trailer_size = 0;
-	u32 byte_alignment = 0;
-	u32 payload_size = 0;
-	u32 payload_count = 0;
-	u32 transfer1_size = 0;
-	u32 transfer2_size = 0;
-	u32 aligned_max_transfer_size = 0;
-	u32 aligned_cd_buffer_size = 0;
-	u32 k_max_leader_size = 0;
-	u32 k_max_trailer_size = 0;
 	int ret = 0;
 
-	if (u3v == NULL)
+	if (u3v == NULL || config_stream == NULL)
 		return -EINVAL;
 
 	dev = u3v->device;
 
-	ret = read_stream_registers(u3v, &req_leader_size, &req_trailer_size);
+	ret = read_stream_registers(u3v, &req_leader_size,
+		&req_trailer_size);
 	if (ret != 0)
 		return ret;
 
-	byte_alignment = u3v->u3v_info->transfer_alignment;
-	aligned_max_transfer_size = (max_urb_size / byte_alignment) *
-		byte_alignment;
-	k_max_leader_size = ((req_leader_size + byte_alignment - 1) /
-		byte_alignment) * byte_alignment;
-	k_max_leader_size = min(k_max_leader_size,
-		aligned_max_transfer_size);
-
-	if (max_leader_size != NULL) {
-		ret = put_user(k_max_leader_size, max_leader_size);
-		if (ret != 0) {
-			dev_err(dev,
-				"%s: Error copying max leader size to user\n",
-				__func__);
-			return ret;
-		}
-	}
-	payload_size = aligned_max_transfer_size;
-	payload_count = compatibility_div(image_buffer_size, payload_size);
-	transfer1_size = (compatibility_mod(image_buffer_size, payload_size) /
-		byte_alignment) * byte_alignment;
-	transfer2_size =
-		compatibility_mod(image_buffer_size, byte_alignment) == 0 ?
-		0 : byte_alignment;
-	k_max_trailer_size = ((req_trailer_size + byte_alignment - 1) /
-		byte_alignment) * byte_alignment;
-	k_max_trailer_size = min(k_max_trailer_size,
-		aligned_max_transfer_size);
-
-	if (max_trailer_size != NULL) {
-		ret = put_user(k_max_trailer_size, max_trailer_size);
-		if (ret != 0) {
-			dev_err(dev,
-				"%s: Error copying max trailer size to user\n",
-				__func__);
-			return ret;
-		}
-	}
-
-	/*
-	 * If there is a separate chunk data buffer, then chunk data size
-	 * will be > 0. In this case image data must fit into the
-	 * transfer buffers or the final transfer 1 payload. If final
-	 * transfer 1 is being used for image data, then the chunk data
-	 * must fit into a single URB. Chunk data does not have to be
-	 * alignmed because it's a small amount of data compared to the
-	 * image. In that case we are okay using the final transfer 2
-	 * buffer for the transfer and then copying the data into the
-	 * chunk data buffer.
-	 */
-	if (chunk_data_buffer_size != 0) {
-		if (transfer2_size != 0) {
-			dev_err(dev,
-				"%s: Cannot split the image and chunk data into separate buffers because the image size is not a multiple of the required transfer alignment size\n",
-				__func__);
-			return U3V_ERR_IMAGE_SIZE_NOT_ALIGNED;
-		}
-		aligned_cd_buffer_size =
-			compatibility_div((chunk_data_buffer_size +
-			byte_alignment - 1), byte_alignment) * byte_alignment;
-		dev_dbg(dev, "%s: aligned chunk data buffer size = %u\n",
-			__func__, aligned_cd_buffer_size);
-		if (transfer1_size != 0 && aligned_cd_buffer_size >
-			aligned_max_transfer_size) {
-			dev_err(dev, "%s: Chunk data size too big\n",
-				__func__);
-			return U3V_ERR_CHUNK_DATA_SIZE_TOO_BIG;
-		}
-
-		if (transfer1_size == 0) {
-			payload_count +=
-				compatibility_div(chunk_data_buffer_size,
-				payload_size);
-			transfer1_size =
-				(compatibility_mod(chunk_data_buffer_size,
-				payload_size) / byte_alignment) *
-				byte_alignment;
-			transfer2_size =
-				compatibility_mod(chunk_data_buffer_size,
-				byte_alignment) == 0 ? 0 : byte_alignment;
-		} else {
-			transfer2_size = aligned_cd_buffer_size;
-		}
-	}
-
-	/* now that the buffer sizes are configured, create the stream */
 	ret = u3v_create_stream(u3v, usb_ifnum_to_if(u3v->udev,
-		u3v->stream_info.idx), image_buffer_size,
-		chunk_data_buffer_size, k_max_leader_size,
-		k_max_trailer_size, payload_size, payload_count,
-		transfer1_size, transfer2_size);
+		u3v->stream_info.idx), config_stream, req_leader_size,
+		req_trailer_size);
 
-	if (ret != 0)
+	if (ret != 0) {
+		dev_err(dev,
+			"%s: Error %d configuring stream interface\n",
+			__func__, ret);
+		u3v_destroy_stream(u3v);
 		return ret;
-
-	ret = write_stream_registers(u3v, k_max_leader_size,
-		k_max_trailer_size, payload_size, payload_count,
-		transfer1_size, transfer2_size);
-
+	}
+	ret = write_stream_registers(u3v);
 	if (ret != 0) {
 		/* caller already holds stream_info->interface_lock */
 		u3v_destroy_stream(u3v);
@@ -812,6 +837,7 @@ static int u3v_configure_stream(struct u3v_device *u3v,
 /*
  * read_stream_registers - helper function for configure_stream that
  *	reads the required leader and trailer sizes from the device
+ *
  * @u3v: pointer to the struct u3v_device
  * @req_leader_size: on successful return, this will point to the
  *	value for the device's required leader size
@@ -821,44 +847,48 @@ static int u3v_configure_stream(struct u3v_device *u3v,
 static int read_stream_registers(struct u3v_device *u3v,
 	u32 *req_leader_size, u32 *req_trailer_size)
 {
-	struct u3v_control *control;
-	struct device *dev;
+	struct u3v_control *control = NULL;
+	struct device *dev = u3v->device;
+	struct usb_endpoint_descriptor *stream_endpoint =
+		u3v->stream_info.bulk_in;
 	u32 leader_size = 0;
 	u32 trailer_size = 0;
-	int bytes_read;
-	int ret;
+	u32 w_max_packet_size = 0;
+	u32 bytes_read = 0;
+	int ret = 0;
 
-	if (u3v == NULL)
-		return -EINVAL;
+	if (stream_endpoint == NULL)
+		return U3V_ERR_STREAM_NOT_CONFIGURED;
 
-	dev = u3v->device;
 	GET_INTERFACE(struct u3v_control *, control, u3v->control_info);
 
 	/*
 	 * Read the required size information. If device reports 0
 	 * for the required leader and trailer size, we set it to
-	 * at least 1024 bytes
+	 * at least wMaxPacketSize
 	 */
+	w_max_packet_size = le16_to_cpu(stream_endpoint->wMaxPacketSize);
 	ret = u3v_read_memory(control, sizeof(leader_size),
 		&bytes_read, u3v->u3v_info->sirm_addr + SI_REQ_LEADER_SIZE,
-		req_leader_size, NULL);
+		req_leader_size);
 
 	if (ret != 0) {
 		dev_err(dev, "%s: Error reading required leader size\n",
 			__func__);
 		goto exit;
 	}
-	leader_size = max(leader_size, (u32)(1024));
+	leader_size = max(leader_size, w_max_packet_size);
 
 	ret = u3v_read_memory(control, sizeof(trailer_size),
 		&bytes_read, u3v->u3v_info->sirm_addr + SI_REQ_TRAILER_SIZE,
-		&trailer_size, NULL);
+		&trailer_size);
 
 	if (ret != 0) {
 		dev_err(dev, "%s: Error reading required trailer size\n",
 			__func__);
+		goto exit;
 	}
-	trailer_size = max(trailer_size, (u32)(1024));
+	trailer_size = max(trailer_size, w_max_packet_size);
 
 	*req_leader_size = leader_size;
 	*req_trailer_size = trailer_size;
@@ -874,62 +904,58 @@ exit:
  *	writes the buffer configuration information out to the device's
  *	stream registers. These sizes were validated previously when
  *	we created the stream interface.
- * @u3v: pointer to the u3v_device struct
- * @max_leader_size: the max required size + alignment for the leader buffer
- * @max_trailer_size: the max required size + alignment for the trailer buffer
- * @payload_size: size of each payload buffer
- * @payload_count: number of payload buffers
- * @transfer1_size: size of transfer1 payload buffer
- * @transfer2_size: size of transfer2 payload buffer
+ *
+ *	@u3v: pointer to the u3v_device struct
  */
-static int write_stream_registers(struct u3v_device *u3v,
-	u32 max_leader_size, u32 max_trailer_size, u32 payload_size,
-	u32 payload_count, u32 transfer1_size, u32 transfer2_size)
+static int write_stream_registers(struct u3v_device *u3v)
 {
-	struct u3v_control *control;
-	struct device *dev;
-	u32 bytes_written;
-	int ret;
+	struct u3v_control *control = NULL;
+	struct u3v_stream *stream = NULL;
+	struct device *dev = u3v->device;
+	u32 bytes_written = 0;
+	int ret = 0;
 
-	if (u3v == NULL)
-		return -EINVAL;
-
-	dev = u3v->device;
 	GET_INTERFACE(struct u3v_control *, control, u3v->control_info);
+	/*
+	 * We cannot call GET_INTERFACE for stream here, since the caller
+	 * already holds the interface lock
+	 */
+	stream = (struct u3v_stream *)(u3v->stream_info.interface_ptr);
 
-	ret = u3v_write_memory(control, sizeof(max_leader_size),
+	ret = u3v_write_memory(control, sizeof(stream->config.max_leader_size),
 		&bytes_written, u3v->u3v_info->sirm_addr + SI_MAX_LEADER_SIZE,
-		&max_leader_size, NULL);
+		&stream->config.max_leader_size);
 	if (ret != 0)
 		goto error;
 
-	ret = u3v_write_memory(control, sizeof(payload_size),
+	ret = u3v_write_memory(control, sizeof(stream->config.payload_size),
 		&bytes_written, u3v->u3v_info->sirm_addr + SI_PAYLOAD_SIZE,
-		&payload_size, NULL);
+		&stream->config.payload_size);
 	if (ret != 0)
 		goto error;
 
-	ret = u3v_write_memory(control, sizeof(payload_count),
+	ret = u3v_write_memory(control, sizeof(stream->config.payload_count),
 		&bytes_written, u3v->u3v_info->sirm_addr + SI_PAYLOAD_COUNT,
-		&payload_count, NULL);
+		&stream->config.payload_count);
 	if (ret != 0)
 		goto error;
 
-	ret = u3v_write_memory(control, sizeof(transfer1_size),
+	ret = u3v_write_memory(control, sizeof(stream->config.transfer1_size),
 		&bytes_written, u3v->u3v_info->sirm_addr + SI_TRANSFER1_SIZE,
-		&transfer1_size, NULL);
+		&stream->config.transfer1_size);
 	if (ret != 0)
 		goto error;
 
-	ret = u3v_write_memory(control, sizeof(transfer2_size),
+	ret = u3v_write_memory(control, sizeof(stream->config.transfer2_size),
 		&bytes_written, u3v->u3v_info->sirm_addr + SI_TRANSFER2_SIZE,
-		&transfer2_size, NULL);
+		&stream->config.transfer2_size);
 	if (ret != 0)
 		goto error;
 
-	ret = u3v_write_memory(control, sizeof(max_trailer_size),
+	ret = u3v_write_memory(control,
+		sizeof(stream->config.max_trailer_size),
 		&bytes_written, u3v->u3v_info->sirm_addr + SI_MAX_TRAILER_SIZE,
-		&max_trailer_size, NULL);
+		&stream->config.max_trailer_size);
 	if (ret != 0)
 		goto error;
 
@@ -951,21 +977,21 @@ error:
  * @requesttype: request type code value
  * @value: message value
  * @index: message index
- * @data: user buffer
+ * @u_data: user buffer
  * @size: size of user buffer
  */
-int u3v_control_msg(struct usb_device *udev, __u8 request, __u8 requesttype,
-	__u16 value, __u16 index, void *data, __u16 size)
+int u3v_control_msg(struct usb_device *udev, u8 request, u8 requesttype,
+	u16 value, u16 index, void *u_data, u16 size)
 {
 	int ret = U3V_ERR_NO_ERROR;
 	int bytes_transferred = 0;
-	void *kdata = NULL;
+	void *data = NULL;
 
-	if (data == NULL)
+	if (u_data == NULL)
 		return -EINVAL;
 
-	kdata = kzalloc(size, GFP_KERNEL);
-	if (kdata == NULL)
+	data = kzalloc(size, GFP_KERNEL);
+	if (data == NULL)
 		return -ENOMEM;
 
 	/*
@@ -974,44 +1000,18 @@ int u3v_control_msg(struct usb_device *udev, __u8 request, __u8 requesttype,
 	 */
 	bytes_transferred = usb_control_msg(udev,
 		usb_rcvctrlpipe(udev, U3V_CTRL_ENDPOINT), request, requesttype,
-		value, index, kdata, size, U3V_TIMEOUT);
+		value, index, data, size, U3V_TIMEOUT);
 
 	if (bytes_transferred != size) {
 		ret = bytes_transferred;
 		goto exit;
 	}
 
-	if (copy_to_user(data, kdata, size) != 0)
+	if (copy_to_user(u_data, data, size) != 0)
 		ret = U3V_ERR_INTERNAL;
-
 exit:
-	kfree(kdata);
+	kfree(data);
 	return ret;
-}
-
-
-/*
- * compatibility_div - returns quotient. Created to use do_div without
- *	altering the dividend. Using do_div for 64 bit / 32 bit division
- *	to avoid __aebi_uldivmod unresolved symbol for 32 bit OSes.
- */
-static u64 compatibility_div(u64 dividend, u32 divisor)
-{
-	u64 dividend_copy = dividend;
-	do_div(dividend_copy, divisor);
-	return dividend_copy;
-}
-
-
-/*
- * compatibility_mod - returns remainder. Created to use do_div without
- *	altering the dividend. Using do_div for 64 bit / 32 bit division
- *	to avoid __aebi_uldivmod unresolved symbol for 32 bit OSes.
- */
-static u32 compatibility_mod(u64 dividend, u32 divisor)
-{
-	u64 dividend_copy = dividend;
-	return do_div(dividend_copy, divisor);
 }
 
 
@@ -1076,21 +1076,23 @@ static int u3v_release(struct inode *inode, struct file *filp)
 
 
 /*
- * u3v_get_os_max_transfer_size - ioctl to get the max transfer size for
- * the os
+ * u3v_get_os_max_transfer_size - [DEPRECATED]
+ * ioctl to get the max transfer size for the os. Deprecated in favor of
+ * sysfs attribute.
  * @u3v - pointer to the u3v struct
- * @os_max - on return, this user pointer will be set to the os max
+ * @u_os_max - on return, this user pointer will be set to the os max
  *	transfer size
  */
-static int u3v_get_os_max_transfer_size(struct u3v_device *u3v, __u32 *os_max)
+static int u3v_get_os_max_transfer_size(struct u3v_device *u3v,
+	__u32 __user *u_os_max)
 {
-	if (u3v == NULL || os_max == NULL)
+	if (u3v == NULL || u_os_max == NULL)
 		return -EINVAL;
 
 	if (u3v->u3v_info->sirm_addr == 0)
 		return U3V_ERR_NO_STREAM_INTERFACE;
 
-	return put_user(u3v->u3v_info->os_max_transfer_size, os_max);
+	return put_user(u3v->u3v_info->os_max_transfer_size, u_os_max);
 }
 
 
@@ -1099,15 +1101,16 @@ static int u3v_get_os_max_transfer_size(struct u3v_device *u3v, __u32 *os_max)
  * @u3v: pointer to the u3v_device struct
  * @alignment: on return, the required URB transfer size alignment
  */
-static int u3v_get_stream_alignment(struct u3v_device *u3v, __u32 *alignment)
+static int u3v_get_stream_alignment(struct u3v_device *u3v,
+	__u32 __user *u_alignment)
 {
-	if (u3v == NULL || u3v->u3v_info == NULL || alignment == NULL)
+	if (u3v == NULL || u3v->u3v_info == NULL || u_alignment == NULL)
 		return -EINVAL;
 
 	if (u3v->u3v_info->sirm_addr == 0)
 		return U3V_ERR_NO_STREAM_INTERFACE;
 
-	return put_user(u3v->u3v_info->transfer_alignment, alignment);
+	return put_user(u3v->u3v_info->transfer_alignment, u_alignment);
 }
 
 
@@ -1221,14 +1224,26 @@ static int populate_u3v_properties(struct u3v_device *u3v)
 	u3v_info->speed_support = buffer[19];
 
 	u3v_info->previously_initialized = 0;
+
+#ifdef ZYNQ_3_2_EHCI_QUIRK
 	/*
 	 * This is a workaround for issues we are seeing with EHCI
 	 * on Zynq targets with the 3.2 kernel. Setting the byte alignment
 	 * to a page enables us to use bounce buffering instead of DMA
 	 * for transfers less than a page in size
 	 */
-#ifdef ZYNQ_3_2_EHCI_QUIRK
 	u3v_info->host_byte_alignment = 4096;
+#elif defined(__arm__)
+	/*
+	 * Since cache coherency around DMA operations on ARM is maintained
+	 * via software, there are issues with flushing and invalidating
+	 * partial cache lines because there is no guarantee that the
+	 * adjacent memory in a cache line isn't being touched throughout
+	 * the duration of the DMA operation. Therefore, we want to ensure
+	 * that all DMA buffer sizes will be cache line aligned and any
+	 * leftover data will be bounce buffered.
+	 */
+	u3v_info->host_byte_alignment = 32;
 #else
 	u3v_info->host_byte_alignment = 1;
 #endif
@@ -1255,6 +1270,21 @@ static int populate_u3v_properties(struct u3v_device *u3v)
 	 */
 	u3v_info->sirm_addr = 0;
 	u3v_info->transfer_alignment = 0;
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(3, 12, 0)
+	/*
+	 * If we are not on xHCI we can't rely on being able to transfer
+	 * elements in the sglist that aren't divisible by the max packet size
+	 */
+	u3v_info->segmented_xfer_supported = hcd_is_xhci(u3v->udev);
+#else
+	u3v_info->segmented_xfer_supported =
+		usb_device_no_sg_constraint(u3v->udev);
+#endif
+	/*
+	 * this feature is currently experimental, so it is disabled
+	 * by default
+	 */
+	u3v_info->segmented_xfer_enabled = 0;
 	return 0;
 }
 
@@ -1364,7 +1394,6 @@ static int u3v_probe(struct usb_interface *interface,
 {
 	struct u3v_device *u3v;
 	struct u3v_device_info *u3v_info;
-	const char *hcd;
 	int ret = 0;
 
 	/* Allocate memory for the device. */
@@ -1395,11 +1424,7 @@ static int u3v_probe(struct usb_interface *interface,
 	 * if the driver is not xhci. If this is fixed in the future,
 	 * we should enable it for xhci for the fixed verion and later
 	 */
-	hcd = bus_to_hcd(u3v->udev->bus)->driver->description;
-	if (strncmp(hcd, "xhci_hcd", 8) == 0)
-		u3v->stalling_disabled = true;
-	else
-		u3v->stalling_disabled = false;
+	u3v->stalling_disabled = hcd_is_xhci(u3v->udev);
 
 	/* Populate u3v_info */
 	if (populate_u3v_properties(u3v) < 0) {
