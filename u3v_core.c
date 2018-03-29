@@ -42,6 +42,7 @@
 #include <linux/lcm.h>
 #include <linux/module.h>
 #include <linux/scatterlist.h>
+#include <linux/stat.h>
 #include <linux/slab.h>
 #include <linux/sysfs.h>
 #include <linux/types.h>
@@ -135,7 +136,7 @@ static ssize_t name##_store(struct device *dev,				\
 									\
 	return count;							\
 }									\
-static DEVICE_ATTR(name, S_IWUGO | S_IRUGO, name##_show, name##_store);
+static DEVICE_ATTR(name, S_IWUSR | S_IWGRP | S_IRUGO, name##_show, name##_store);
 
 #define u3v_attribute_str(name)						\
 static ssize_t name##_show(struct device *dev,				\

@@ -1348,14 +1348,11 @@ static struct page **lock_user_pages(struct u3v_stream *stream,
 	down_read(&current->mm->mmap_sem);
 	/* will store a page locked array of physical pages in pages var */
 	ret = get_user_pages(
-		current,
-		current->mm,
-		uaddr,
-		num_pages,
-		WRITE,
-		0, /* Don't force */
-		pages,
-		NULL);
+            uaddr,
+            num_pages,
+            WRITE,
+            pages,
+            NULL);
 	up_read(&current->mm->mmap_sem);
 
 	if (ret < num_pages) {

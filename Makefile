@@ -42,7 +42,7 @@ ifneq ($(version_compatibility),)
 	EXTRA_CFLAGS += -DVERSION_COMPATIBILITY
 endif
 
-obj-m := u3v.o
+obj-m += u3v.o
 u3v-objs := u3v_core.o u3v_control.o u3v_event.o u3v_stream.o
 
 else
@@ -51,23 +51,24 @@ PWD := $(shell pwd)
 
 MOD_DIR := kernel/natinst/u3v
 MOD_PATH := /lib/modules/$(shell uname -r)/$(MOD_DIR)
+KERNELHEADERS := /usr/src/linux-headers-$(shell uname -r)
 
 all:
-	@$(MAKE) --no-print-directory -C $(KERNELHEADERS) M=$(PWD) modules
+	$(MAKE) -C $(KERNELHEADERS) M=$(PWD) modules
 
 debug: all
 	EXTRA_CFLAGS += -DDEBUG -g
 
 install: all
-	@$(MAKE) --no-print-directory -C $(KERNELHEADERS) M=$(PWD) INSTALL_MOD_DIR=$(MOD_DIR) modules_install
+	$(MAKE) -C $(KERNELHEADERS) M=$(PWD) INSTALL_MOD_DIR=$(MOD_DIR) modules_install
 
 uninstall:
-	@$(RM) -rf $(MOD_PATH)
-	@/sbin/depmod -a
+	$(RM) -rf $(MOD_PATH)
+	/sbin/depmod -a
 
 clean:
-	@$(MAKE) --no-print-directory -s -C $(KERNELHEADERS) M=$(PWD) clean
-	@$(RM) -rf Module.*
+	$(MAKE) -s -C $(KERNELHEADERS) M=$(PWD) clean
+	$(RM) -rf Module.*
 
 .PHONY: all install uninstall clean
 
