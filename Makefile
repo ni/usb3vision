@@ -51,7 +51,12 @@ PWD := $(shell pwd)
 
 MOD_DIR := kernel/natinst/u3v
 MOD_PATH := /lib/modules/$(shell uname -r)/$(MOD_DIR)
-KERNELHEADERS := /usr/src/linux-headers-$(shell uname -r)
+
+$(warning Be sure you have set correct path in KERNELHEADERS)
+ifeq ($(KERNELHEADERS),)
+	KERNELHEADERS := /usr/src/linux-headers-$(shell uname -r)
+endif
+$(warning Path is set to: $(KERNELHEADERS))
 
 all:
 	$(MAKE) -C $(KERNELHEADERS) M=$(PWD) modules
