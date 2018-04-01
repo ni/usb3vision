@@ -52,6 +52,11 @@
 #include <linux/usb.h>
 #include <linux/vmalloc.h>
 #include <asm/unaligned.h>
+#ifdef VERSION_COMPATIBILITY
+	#include <linux/version.h>
+#else
+	#include <generated/uapi/linux/version.h>
+#endif
 
 
 /* Internal stream structs and enums */
@@ -1348,12 +1353,18 @@ static struct page **lock_user_pages(struct u3v_stream *stream,
 	down_read(&current->mm->mmap_sem);
 	/* will store a page locked array of physical pages in pages var */
 	ret = get_user_pages(
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 6, 0)
 		current,
 		current->mm,
+#endif
 		uaddr,
 		num_pages,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 9, 0)
 		WRITE,
 		0, /* Don't force */
+#else
+		FOLL_WRITE,
+#endif
 		pages,
 		NULL);
 	up_read(&current->mm->mmap_sem);
@@ -1495,10 +1506,26 @@ static int calculate_sglist_entries(struct u3v_stream *stream,
 				pg_idx, offset, limit);
 			if (bytes_to_transfer < 0)
 				return bytes_to_transfer;
-			if (stream->config.sg_constraint &&
-			   (pglist_bytes_remaining > w_max_packet_size)) {
-				bytes_to_transfer = rounddown(bytes_to_transfer,
-					w_max_packet_size);
+			if (stream->config.sg_constraint) {
+				if (bytes_to_transfer > w_max_packet_size) {
+					bytes_to_transfer = rounddown(
+						bytes_to_transfer,
+						w_max_packet_size);
+				} else if (bytes_to_transfer < w_max_packet_size
+					&& !(sg_count == 0 ||
+					bytes_to_transfer ==
+					pglist_bytes_remaining)) {
+					/*
+					 * if we're in the constraint case,
+					 * the scatterlist can be unaligned
+					 * with w_max_packet_size only if it's
+					 * the first or last entry in the list
+					 */
+					dev_err(stream->u3v_dev->device,
+						"%s: invalid buffer: if sg_constraint is true, a buffer can only have a scatterlist entry smaller than w_max_packet_size if it's the first or last in the list\n",
+						__func__);
+					return U3V_ERR_INTERNAL;
+				}
 			}
 			segment_bytes_remaining -= bytes_to_transfer;
 			if (configure) {
