@@ -115,7 +115,8 @@ int u3v_create_control(struct u3v_device *u3v)
 		goto error;
 	}
 
-	if (!u3v->stalling_disabled)
+	if (!u3v->stalling_disabled &&
+	    u3v->u3v_info->legacy_ctrl_ep_stall_enabled)
 		reset_pipe(u3v, &u3v->control_info);
 
 	/*
@@ -194,7 +195,8 @@ void u3v_destroy_control(struct u3v_device *u3v)
 
 	wait_for_completion(&u3v->control_info.ioctl_complete);
 
-	if (!u3v->stalling_disabled)
+	if (!u3v->stalling_disabled &&
+	    u3v->u3v_info->legacy_ctrl_ep_stall_enabled)
 		reset_pipe(u3v, &u3v->control_info);
 
 	kfree(ctrl->ack_buffer);
@@ -365,8 +367,6 @@ int u3v_read_memory(struct u3v_control *ctrl, u32 transfer_size,
 				dev_err(dev,
 					"%s: received an invalid READMEM_ACK buffer\n",
 					__func__);
-				dev_err(dev, "\tReceived bytes = %d, expected %zu\n",
-					actual, ack_buffer_size);
 				dev_err(dev, "\tPrefix = 0x%X, expected 0x%X\n",
 					ack->header.prefix, U3V_CONTROL_PREFIX);
 				dev_err(dev, "\tCmd = 0x%X, expected 0x%X or 0x%X\n",
@@ -600,8 +600,6 @@ int u3v_write_memory(struct u3v_control *ctrl, u32 transfer_size,
 				dev_err(dev,
 					"%s: received an invalid WRITEMEM_ACK buffer\n",
 					__func__);
-				dev_err(dev, "\tReceived bytes = %d, expected %zu\n",
-					actual, ack_buffer_size);
 				dev_err(dev, "\tPrefix = 0x%X, expected 0x%X\n",
 					ack->header.prefix, U3V_CONTROL_PREFIX);
 				dev_err(dev, "\tCmd = 0x%X, expected 0x%X or 0x%X\n",

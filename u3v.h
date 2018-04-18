@@ -125,6 +125,7 @@ struct u3v_device_info {
 	u32 transfer_alignment;
 	u32 segmented_xfer_supported;
 	u32 segmented_xfer_enabled;
+	u32 legacy_ctrl_ep_stall_enabled;
 };
 
 /* Helper functions for interfaces */
@@ -155,7 +156,8 @@ static inline struct u3v_device *u3v_get_driver_data(struct device *dev)
 static inline bool hcd_is_xhci(struct usb_device *udev)
 {
 	const char *hcd = bus_to_hcd(udev->bus)->driver->description;
-	return (strncmp(hcd, "xhci_hcd", 8) == 0);
+	return (strncmp(hcd, "xhci_hcd", 8) == 0 ||
+		strncmp(hcd, "xhci-hcd", 8) == 0);
 }
 
 #define GET_INTERFACE(ptr_type, ptr, interface_info)		\

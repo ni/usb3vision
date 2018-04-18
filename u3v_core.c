@@ -136,7 +136,8 @@ static ssize_t name##_store(struct device *dev,				\
 									\
 	return count;							\
 }									\
-static DEVICE_ATTR(name, S_IWUSR | S_IWGRP | S_IRUGO, name##_show, name##_store);
+static DEVICE_ATTR(name, S_IWUSR | S_IWGRP | S_IRUGO,			\
+	name##_show, name##_store);
 
 #define u3v_attribute_str(name)						\
 static ssize_t name##_show(struct device *dev,				\
@@ -199,6 +200,7 @@ u3v_attribute_num(host_byte_alignment);
 u3v_attribute_num(os_max_transfer_size);
 u3v_attribute_num(segmented_xfer_supported);
 u3v_attribute_num_rw(segmented_xfer_enabled);
+u3v_attribute_num_rw(legacy_ctrl_ep_stall_enabled);
 
 static struct attribute *u3v_attrs[] = {
 	&dev_attr_idVendor.attr,
@@ -222,6 +224,7 @@ static struct attribute *u3v_attrs[] = {
 	&dev_attr_os_max_transfer_size.attr,
 	&dev_attr_segmented_xfer_supported.attr,
 	&dev_attr_segmented_xfer_enabled.attr,
+	&dev_attr_legacy_ctrl_ep_stall_enabled.attr,
 	NULL,
 };
 
@@ -1282,7 +1285,7 @@ static int populate_u3v_properties(struct u3v_device *u3v)
 		usb_device_no_sg_constraint(u3v->udev);
 #endif
 	/*
-	 * this feature is currently experimental, so it is disabled
+	 * This feature is currently experimental, so it is disabled
 	 * by default
 	 */
 	u3v_info->segmented_xfer_enabled = 0;
@@ -1291,8 +1294,23 @@ static int populate_u3v_properties(struct u3v_device *u3v)
 
 
 /*
+ * initialize_interface_management - this helper function initializes
+ *	interface_info members required for interface management
+ * @info: pointer to a u3v_interface_info struct
+ */
+static void initialize_interface_management(struct u3v_interface_info *info)
+{
+	info->ioctl_count = 0;
+	mutex_init(&info->interface_lock);
+	mutex_init(&info->ioctl_count_lock);
+	init_completion(&info->ioctl_complete);
+	complete_all(&info->ioctl_complete);
+}
+
+
+/*
  * enumerate_u3v_interfaces - called by probe to claim the interfaces and
- * store their endpoint information
+ *	store their endpoint information
  * @u3v - pointer to the u3v device struct
  */
 static int enumerate_u3v_interfaces(struct u3v_device *u3v)
@@ -1328,11 +1346,6 @@ static int enumerate_u3v_interfaces(struct u3v_device *u3v)
 				find_bulk_endpoint(iface_desc, in);
 			u3v->control_info.bulk_out =
 				find_bulk_endpoint(iface_desc, out);
-			u3v->control_info.ioctl_count = 0;
-			mutex_init(&u3v->control_info.interface_lock);
-			mutex_init(&u3v->control_info.ioctl_count_lock);
-			init_completion(&u3v->control_info.ioctl_complete);
-			complete_all(&u3v->control_info.ioctl_complete);
 			break;
 		case U3V_INTERFACE_PROTOCOL_EVENT:
 			/* claim event interface */
@@ -1350,11 +1363,6 @@ static int enumerate_u3v_interfaces(struct u3v_device *u3v)
 			u3v->event_info.bulk_in =
 				find_bulk_endpoint(iface_desc, in);
 			u3v->event_info.bulk_out = NULL;
-			u3v->event_info.ioctl_count = 0;
-			mutex_init(&u3v->event_info.interface_lock);
-			mutex_init(&u3v->event_info.ioctl_count_lock);
-			init_completion(&u3v->event_info.ioctl_complete);
-			complete_all(&u3v->event_info.ioctl_complete);
 			break;
 		case U3V_INTERFACE_PROTOCOL_STREAM:
 			/* claim stream interface */
@@ -1372,11 +1380,6 @@ static int enumerate_u3v_interfaces(struct u3v_device *u3v)
 			u3v->stream_info.bulk_in =
 				find_bulk_endpoint(iface_desc, in);
 			u3v->stream_info.bulk_out = NULL;
-			u3v->stream_info.ioctl_count = 0;
-			mutex_init(&u3v->stream_info.interface_lock);
-			mutex_init(&u3v->stream_info.ioctl_count_lock);
-			init_completion(&u3v->stream_info.ioctl_complete);
-			complete_all(&u3v->stream_info.ioctl_complete);
 			break;
 		}
 	}
@@ -1434,6 +1437,19 @@ static int u3v_probe(struct usb_interface *interface,
 		ret = U3V_ERR_INVALID_USB_DESCRIPTOR;
 		goto error;
 	}
+	/*
+	 * We unconditionally initialize the struct members related to
+	 * interface management for the control, stream, and event
+	 * channels. Regardless of whether the optional stream and
+	 * event channels are supported, we need to keep track of
+	 * ioctl calls per interface that are in flight. Guaranteeing
+	 * that these members are initialized allows us to push the
+	 * error-handling logic to the respective interface classes
+	 * instead of the top level ioctls.
+	 */
+	initialize_interface_management(&u3v->control_info);
+	initialize_interface_management(&u3v->stream_info);
+	initialize_interface_management(&u3v->event_info);
 
 	ret = enumerate_u3v_interfaces(u3v);
 	if (ret < 0)

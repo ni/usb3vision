@@ -97,7 +97,7 @@ int u3v_create_events(struct u3v_device *u3v, struct usb_interface *intf,
 	if (u3v->event_info.bulk_in == NULL) {
 		dev_err(u3v->device,
 			"%s: Did not detect bulk in endpoint in the event interface.\n",
-			__func__);
+		__func__);
 		return U3V_ERR_NO_EVENT_INTERFACE;
 	}
 
@@ -189,7 +189,7 @@ error:
 	}
 	unconfigure_events(event);
 	dev_err(event->u3v_dev->device,
-		"%s: Error allocating memory for event queue\n", __func__);
+	    "%s: Error allocating memory for event queue\n", __func__);
 	return -ENOMEM;
 }
 
@@ -359,7 +359,7 @@ static int queue_next_event(struct u3v_event *event)
 	}
 
 	entry = list_first_entry(&event->event_queue,
-		struct event_entry, list_elem);
+	    struct event_entry, list_elem);
 
 	if (entry->state == event_queued) {
 		dev_err(event->u3v_dev->device,
@@ -417,10 +417,10 @@ static int submit_event_urb(struct u3v_event *event, struct event_entry *entry)
 		return 0;
 
 	usb_fill_bulk_urb(entry->purb, udev,
-		usb_rcvbulkpipe(udev,
+	    usb_rcvbulkpipe(udev,
 		usb_endpoint_num(event->u3v_dev->event_info.bulk_in)),
-		entry->buffer, entry->buffer_size, event_urb_completion,
-		entry);
+	    entry->buffer, entry->buffer_size, event_urb_completion,
+	    entry);
 
 	usb_anchor_urb(entry->purb, &event->event_anchor);
 	ret = usb_submit_urb(entry->purb, GFP_KERNEL);
@@ -456,16 +456,15 @@ static void event_urb_completion(struct urb *purb)
 	    purb->status == -ECONNRESET ||
 	    purb->status == -ESHUTDOWN ||
 	    purb->status == -EPROTO)) {
-		dev_err(dev,
-			"%s: Received nonzero urb completion status: %d",
+		dev_err(dev, "%s: Received nonzero urb completion status: %d",
 			__func__, purb->status);
 	}
 
 	entry = (struct event_entry *)(purb->context);
 	if (entry == NULL) {
 		dev_err(dev, "%s: Received a NULL context pointer\n",
-		__func__);
-	return;
+			__func__);
+		return;
 	}
 	/* Ensure buffer was queued */
 	WARN_ON(entry->state != event_queued);
@@ -521,7 +520,7 @@ int u3v_wait_for_event(struct u3v_event *event, void __user *u_buffer,
 		goto exit;
 	}
 	entry = list_first_entry(&event->event_queue,
-		struct event_entry, list_elem);
+	    struct event_entry, list_elem);
 
 	/* Ensure that we are waiting on a queued event */
 	if (entry->state == event_idle) {
@@ -555,18 +554,18 @@ int u3v_wait_for_event(struct u3v_event *event, void __user *u_buffer,
 		/* check if we were interrupted by a signal */
 		if (ret != 0) {
 			dev_dbg(dev, "%s: wait interrupted by signal\n",
-			__func__);
+				__func__);
 			ret = U3V_ERR_EVENT_WAIT_CANCELED;
 			goto exit;
 		}
 
 		/* check if device was removed or wait cancelled somehow */
 		if (!event->u3v_dev->device_connected ||
-		   !event->started ||
-		    entry->callback_status == -ENOENT ||
-		    entry->callback_status == -ECONNRESET ||
-		    entry->callback_status == -ESHUTDOWN ||
-		    entry->callback_status == -EPROTO) {
+			!event->started ||
+			entry->callback_status == -ENOENT ||
+			entry->callback_status == -ECONNRESET ||
+			entry->callback_status == -ESHUTDOWN ||
+			entry->callback_status == -EPROTO) {
 
 			dev_dbg(dev, "%s: Event interface was stopped\n",
 				__func__);
@@ -577,7 +576,7 @@ int u3v_wait_for_event(struct u3v_event *event, void __user *u_buffer,
 		/* Don't keep waiting if next event isn't queued */
 		if (entry->state == event_idle) {
 			dev_err(dev, "%s: Cannot wait on an unqueued entry\n",
-			__func__);
+				__func__);
 			ret = U3V_ERR_EVENTS_NOT_STARTED;
 			goto exit;
 		}
@@ -617,7 +616,7 @@ static int transfer_event_data(struct u3v_event *event, void __user *u_buffer,
 
 	dev = event->u3v_dev->device;
 	entry = list_first_entry(&event->event_queue,
-		struct event_entry, list_elem);
+	    struct event_entry, list_elem);
 
 	/* Ensure we received a valid event command */
 	cmd = (struct command *)(entry->buffer);
