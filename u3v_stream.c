@@ -1350,7 +1350,11 @@ static struct page **lock_user_pages(struct u3v_stream *stream,
 		return NULL;
 
 	/* Fault in all of the necessary pages */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0)
 	down_read(&current->mm->mmap_sem);
+#else
+	down_read(&current->mm->mmap_lock);
+#endif
 	/* will store a page locked array of physical pages in pages var */
 	ret = get_user_pages(
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 6, 0)
@@ -1367,7 +1371,11 @@ static struct page **lock_user_pages(struct u3v_stream *stream,
 #endif
 		pages,
 		NULL);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0)
 	up_read(&current->mm->mmap_sem);
+#else
+	up_read(&current->mm->mmap_lock);
+#endif
 
 	if (ret < num_pages) {
 		dev_err(dev, "%s: get_user_pages returned %d, expected %d\n",
@@ -1943,7 +1951,7 @@ static void stream_urb_completion(struct urb *purb)
 		return;
 
 	/* If status is already bad, don't overwrite */
-	if (purb->status != 0)
+	if (entry->status != 0)
 		entry->status = purb->status;
 	len = purb->actual_length;
 
