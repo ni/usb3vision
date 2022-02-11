@@ -46,6 +46,7 @@ struct u3v_control {
 	u8 *cmd_buffer;
 	u32 max_cmd_transfer_size;
 	u16 request_id;
+	u16 max_request_id; /* Maximum id value we can have before we loop back around */
 	u32 u3v_timeout; /* Maximum device response time in ms */
 };
 

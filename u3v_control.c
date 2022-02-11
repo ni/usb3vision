@@ -103,6 +103,9 @@ int u3v_create_control(struct u3v_device *u3v)
 	/* id is preincremented so we want it to start at 0 */
 	ctrl->request_id = -1;
 
+	/* Set the maximum id value so that we can skip 0 once we overflow */
+	ctrl->max_request_id = -1;
+
 	ctrl->ack_buffer =
 		kzalloc(ctrl->max_ack_transfer_size, GFP_KERNEL);
 	ctrl->cmd_buffer =
@@ -279,6 +282,9 @@ int u3v_read_memory(struct u3v_control *ctrl, u32 transfer_size,
 		command->header.cmd = cpu_to_le16(READMEM_CMD);
 		command->header.length =
 			cpu_to_le16(sizeof(struct read_mem_cmd_payload));
+		if (ctrl->request_id + 1 == ctrl->max_request_id) {
+			ctrl->request_id = 0;
+		}
 		command->header.request_id = cpu_to_le16(++(ctrl->request_id));
 		payload->address = address + total_bytes_read;
 		payload->reserved = 0;
@@ -511,6 +517,9 @@ int u3v_write_memory(struct u3v_control *ctrl, u32 transfer_size,
 		command->header.length =
 			cpu_to_le16(sizeof(struct write_mem_cmd_payload) +
 			bytes_this_iteration);
+		if (ctrl->request_id + 1 == ctrl->max_request_id) {
+			ctrl->request_id = 0;
+		}
 		command->header.request_id = cpu_to_le16(++(ctrl->request_id));
 		payload->address = cpu_to_le64(address + total_bytes_written);
 		memcpy(payload->data, (u8 *)(buffer + total_bytes_written),
