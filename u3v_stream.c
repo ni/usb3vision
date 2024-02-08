@@ -1355,22 +1355,20 @@ static struct page **lock_user_pages(struct u3v_stream *stream,
 #else
 	down_read(&current->mm->mmap_lock);
 #endif
-	/* will store a page locked array of physical pages in pages var */
-	ret = get_user_pages(
+
+/* will store a page locked array of physical pages in pages var */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 6, 0)
-		current,
-		current->mm,
-#endif
-		uaddr,
-		num_pages,
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 9, 0)
-		WRITE,
-		0, /* Don't force */
+	ret = get_user_pages(current, current->mm, uaddr, num_pages, WRITE, 0, pages, NULL);
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(4, 9, 0)
+	ret = get_user_pages(uaddr, num_pages, WRITE, 0, pages, NULL);
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(6, 5, 0)
+	// replace get_user_pages() write/force parameters with gup_flags in Commit 768ae30
+	ret = get_user_pages(uaddr, num_pages, FOLL_WRITE, pages, NULL);
 #else
-		FOLL_WRITE,
+	// vmas parameter removed from get_user_pages() in Commit 54d0206
+	ret = get_user_pages(uaddr, num_pages, FOLL_WRITE, pages);
 #endif
-		pages,
-		NULL);
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0)
 	up_read(&current->mm->mmap_sem);
 #else
