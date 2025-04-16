@@ -47,15 +47,15 @@
 #include <linux/types.h>
 #include <linux/uaccess.h>
 #include <linux/usb.h>
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
-	#include <linux/unaligned.h>
-#else
-	#include <asm/unaligned.h>
-#endif
 #ifdef VERSION_COMPATIBILITY
 	#include <linux/version.h>
 #else
 	#include <generated/uapi/linux/version.h>
+#endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+	#include <linux/unaligned.h>
+#else
+	#include <asm/unaligned.h>
 #endif
 
 
