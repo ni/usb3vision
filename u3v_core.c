@@ -53,7 +53,7 @@
 	#include <generated/uapi/linux/version.h>
 #endif
 // In the kernel version >= 6.12.0, <asm/unaligned.h> is removed and replaced with <linux/unaligned.h>.
-// See these patches: https://lore.kernel.org/linux-parisc/20241002221749.GI4017910@ZenIV/T/
+// See this commit: https://github.com/torvalds/linux/commit/5f60d5f6bbc12e782fac78110b0ee62698f3b576
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
 	#include <linux/unaligned.h>
 #else
