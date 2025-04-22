@@ -43,8 +43,18 @@
 #include <linux/usb.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
-#include <linux/version.h>
-#include <asm/unaligned.h>
+#ifdef VERSION_COMPATIBILITY
+	#include <linux/version.h>
+#else
+	#include <generated/uapi/linux/version.h>
+#endif
+// In the kernel version >= 6.12.0, <asm/unaligned.h> is removed and replaced with <linux/unaligned.h>.
+// See this commit: https://github.com/torvalds/linux/commit/5f60d5f6bbc12e782fac78110b0ee62698f3b576
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+	#include <linux/unaligned.h>
+#else
+	#include <asm/unaligned.h>
+#endif
 
 /*
  * u3v_create_control - Initializes the control interface.
