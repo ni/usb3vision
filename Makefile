@@ -39,7 +39,7 @@ ifneq ($(KERNELRELEASE),)
 # if version_compatibility is defined, add a cflag to include the right
 # header files
 ifneq ($(version_compatibility),)
-	EXTRA_CFLAGS += -DVERSION_COMPATIBILITY
+	ccflags-y  += -DVERSION_COMPATIBILITY
 endif
 
 obj-m := u3v.o
@@ -56,7 +56,7 @@ all:
 	@$(MAKE) --no-print-directory -C $(KERNELHEADERS) M=$(PWD) modules
 
 debug: all
-	EXTRA_CFLAGS += -DDEBUG -g
+	ccflags-y  += -DDEBUG -g
 
 install: all
 	@$(MAKE) --no-print-directory -C $(KERNELHEADERS) M=$(PWD) INSTALL_MOD_DIR=$(MOD_DIR) modules_install
